@@ -1,5 +1,6 @@
 import * as tiktokService from '../services/tiktok.service.js';
 import * as dbService from '../services/db.service.js';
+import { MONITORING_INTERVAL_MS } from '../config/constants.js';
 
 // مجموعة لتتبع المستخدمين الذين يتم تسجيلهم حاليًا لمنع التسجيل المزدوج
 const currentlyRecording = new Set();
@@ -28,11 +29,17 @@ async function checkMonitoredUsers(bot) {
                 // إنشاء كائن context مزيف يشبه الذي يرسله تليجرام
                 const fakeContext = {
                     chat: { id: user.chatId },
-                    reply: (text) => bot.telegram.sendMessage(user.chatId, text)
+                    reply: (text) => bot.telegram.sendMessage(user.chatId, text),
+                    replyWithVideo: (video) => bot.telegram.sendVideo(user.chatId, video.source)
                 };
                 
-                // استدعاء دالة التسجيل التي تم تمريرها
-                handleRecordLive(fakeContext, user.username);
+                // استدعاء دالة التسجيل التي تم تمريرها مع await للتعامل مع الأخطاء
+                try {
+                    await handleRecordLive(fakeContext, user.username);
+                } catch (recordError) {
+                    console.error(`[Monitor] خطأ في تسجيل ${user.username}:`, recordError);
+                    currentlyRecording.delete(user.username);
+                }
             }
         } catch (error) {
             console.error(`[Monitor] خطأ أثناء فحص المستخدم ${user.username}:`, error);
@@ -47,8 +54,8 @@ async function checkMonitoredUsers(bot) {
  */
 function startMonitoring(bot, recordFunction) {
     handleRecordLive = recordFunction; // تخزين الدالة للاستخدام
-    console.log('[Monitor] تم تفعيل خدمة المراقبة.');
-    setInterval(() => checkMonitoredUsers(bot), 300000);
+    console.log(`[Monitor] تم تفعيل خدمة المراقبة. الفحص كل ${MONITORING_INTERVAL_MS / 60000} دقائق.`);
+    setInterval(() => checkMonitoredUsers(bot), MONITORING_INTERVAL_MS);
     checkMonitoredUsers(bot);
 }
 

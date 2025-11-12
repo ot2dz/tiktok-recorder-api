@@ -2,22 +2,16 @@ import { Telegraf, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
-import dns from 'dns'; // <-- أضف هذا السطر
 
-// --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
-dns.setServers(['8.8.8.8', '1.1.1.1']);
-console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى Google & Cloudflare.');
-// -------------------------------------------------------------
-
-// استيراد كل دالة باسمها المحدد مباشرة
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideo } from './services/cloudinary.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
+import { BOT_BUTTONS, ERROR_MESSAGES, FILE_CONFIG } from './config/constants.js';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
-    console.error('خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في ملف .env');
+    console.error(ERROR_MESSAGES.MISSING_TOKEN);
     process.exit(1);
 }
 
@@ -25,14 +19,11 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const userState = {};
 const activeRecordings = {};
 
-const CHECK_STATUS_BTN = '🔍 فحص حالة البث';
-const RECORD_LIVE_BTN = '🔴 بدء تسجيل بث';
-const MANAGE_MONITOR_BTN = '⚙️ إدارة المراقبة';
-
 const mainKeyboard = Markup.keyboard([
-    [CHECK_STATUS_BTN, RECORD_LIVE_BTN],
-    [MANAGE_MONITOR_BTN]
+    [BOT_BUTTONS.CHECK_STATUS, BOT_BUTTONS.RECORD_LIVE],
+    [BOT_BUTTONS.MANAGE_MONITOR]
 ]).resize();
+
 
 bot.start((ctx) => {
     ctx.reply(
@@ -41,17 +32,17 @@ bot.start((ctx) => {
     );
 });
 
-bot.hears(CHECK_STATUS_BTN, (ctx) => {
+bot.hears(BOT_BUTTONS.CHECK_STATUS, (ctx) => {
     userState[ctx.chat.id] = 'check_status';
     ctx.reply('حسناً، أرسل الآن اسم المستخدم على تيك توك الذي تريد فحصه.');
 });
 
-bot.hears(RECORD_LIVE_BTN, (ctx) => {
+bot.hears(BOT_BUTTONS.RECORD_LIVE, (ctx) => {
     userState[ctx.chat.id] = 'record_live';
     ctx.reply('حسناً، أرسل الآن اسم المستخدم على تيك توك الذي تريد بدء تسجيله.');
 });
 
-bot.hears(MANAGE_MONITOR_BTN, (ctx) => {
+bot.hears(BOT_BUTTONS.MANAGE_MONITOR, (ctx) => {
     const monitorKeyboard = Markup.inlineKeyboard([
         [Markup.button.callback('➕ إضافة مستخدم للمراقبة', 'add_monitor')],
         [Markup.button.callback('🗑️ حذف مستخدم من المراقبة', 'remove_monitor')],
@@ -106,14 +97,26 @@ bot.on(message('text'), async (ctx) => {
         case 'record_live':
             await handleRecordLive(ctx, username);
             break;
-        case 'add_monitor':
-            await addUserToMonitor(username, chatId);
-            await ctx.reply(`✅ تم إضافة المستخدم "${username}" إلى قائمة المراقبة.`);
+        case 'add_monitor': {
+            const validatedUsername = validateUsername(username);
+            if (!validatedUsername) {
+                await ctx.reply('❌ اسم المستخدم غير صالح. يرجى استخدام أحرف وأرقام فقط.');
+                return;
+            }
+            await addUserToMonitor(validatedUsername, chatId);
+            await ctx.reply(`✅ تم إضافة المستخدم "${validatedUsername}" إلى قائمة المراقبة.`);
             break;
-        case 'remove_monitor':
-            await removeUserFromMonitor(username, chatId);
-            await ctx.reply(`🗑️ تم حذف المستخدم "${username}" من قائمة المراقبة.`);
+        }
+        case 'remove_monitor': {
+            const validatedUsername = validateUsername(username);
+            if (!validatedUsername) {
+                await ctx.reply('❌ اسم المستخدم غير صالح.');
+                return;
+            }
+            await removeUserFromMonitor(validatedUsername, chatId);
+            await ctx.reply(`🗑️ تم حذف المستخدم "${validatedUsername}" من قائمة المراقبة.`);
             break;
+        }
     }
 });
 
@@ -129,93 +132,158 @@ bot.action(/stop_record_(.+)/, (ctx) => {
     }
 });
 
+/**
+ * Validates and sanitizes a TikTok username
+ * @param {string} username - The username to validate
+ * @returns {string|null} Sanitized username or null if invalid
+ */
+function validateUsername(username) {
+    if (!username || typeof username !== 'string') {
+        return null;
+    }
+    // Remove potentially dangerous characters and limit length
+    const sanitized = username.replace(/[^a-zA-Z0-9._-]/g, '').substring(0, FILE_CONFIG.MAX_USERNAME_LENGTH);
+    return sanitized.length > 0 ? sanitized : null;
+}
+
+/**
+ * Handles checking the live status of a TikTok user
+ * @param {Context} ctx - Telegram context
+ * @param {string} username - TikTok username
+ */
 async function handleCheckStatus(ctx, username) {
-    await ctx.reply(`جاري فحص حالة المستخدم "${username}"...`);
+    const validatedUsername = validateUsername(username);
+    if (!validatedUsername) {
+        await ctx.reply(ERROR_MESSAGES.INVALID_USERNAME);
+        return;
+    }
+
+    await ctx.reply(`جاري فحص حالة المستخدم "${validatedUsername}"...`);
     try {
-        const roomId = await getRoomId(username);
-        
-        // --- إضافة سطر التصحيح هنا ---
-        console.log(`[Bot Logic] القيمة العائدة من getRoomId هي: ${roomId}`);
-        // ---------------------------------
+        const roomId = await getRoomId(validatedUsername);
 
         if (!roomId || !(await isUserLive(roomId))) {
-            await ctx.reply(`❌ المستخدم "${username}" ليس في بث مباشر حالياً.`);
+            await ctx.reply(`❌ المستخدم "${validatedUsername}" ${ERROR_MESSAGES.NOT_LIVE}`);
             return;
         }
-        await ctx.reply(`✅ المستخدم "${username}" في بث مباشر الآن!`);
+        await ctx.reply(`✅ المستخدم "${validatedUsername}" في بث مباشر الآن!`);
     } catch (error) {
-        console.error(error);
-        await ctx.reply('حدث خطأ أثناء محاولة فحص حالة المستخدم.');
+        console.error('[Bot] Error in handleCheckStatus:', error);
+        await ctx.reply(ERROR_MESSAGES.GENERAL_ERROR);
     }
 }
 
 
+/**
+ * Handles recording a live stream
+ * @param {Context} ctx - Telegram context
+ * @param {string} username - TikTok username
+ */
 async function handleRecordLive(ctx, username) {
-    if (activeRecordings[username]) {
-        await ctx.reply(`يوجد بالفعل عملية تسجيل جارية للمستخدم ${username}.`);
+    const validatedUsername = validateUsername(username);
+    if (!validatedUsername) {
+        await ctx.reply(ERROR_MESSAGES.INVALID_USERNAME);
         return;
     }
 
-    const checkingMsg = await ctx.reply(`جاري التحقق من حالة ${username} قبل بدء التسجيل...`);
+    if (activeRecordings[validatedUsername]) {
+        await ctx.reply(`${ERROR_MESSAGES.RECORDING_IN_PROGRESS} ${validatedUsername}.`);
+        return;
+    }
+
+    const checkingMsg = await ctx.reply(`جاري التحقق من حالة ${validatedUsername} قبل بدء التسجيل...`);
     
     try {
-        const roomId = await getRoomId(username);
+        const roomId = await getRoomId(validatedUsername);
         if (!roomId || !(await isUserLive(roomId))) {
-            await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `❌ لا يمكن بدء التسجيل. المستخدم "${username}" ليس في بث مباشر حالياً.`);
+            await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `❌ لا يمكن بدء التسجيل. المستخدم "${validatedUsername}" ${ERROR_MESSAGES.NOT_LIVE}`);
             return;
         }
 
         const streamUrl = await getLiveStreamUrl(roomId);
         if (!streamUrl) {
-            await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, 'حدث خطأ: لم يتم العثور على رابط البث.');
+            await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, ERROR_MESSAGES.STREAM_NOT_FOUND);
             return;
         }
 
         const controller = new AbortController();
         const stopButton = Markup.inlineKeyboard([
-            Markup.button.callback('⏹️ إيقاف التسجيل', `stop_record_${username}`)
+            Markup.button.callback('⏹️ إيقاف التسجيل', `stop_record_${validatedUsername}`)
         ]);
 
-        const recordingMsg = await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `🔴 بدأ تسجيل البث للمستخدم ${username}...`, stopButton);
+        const recordingMsg = await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `🔴 بدأ تسجيل البث للمستخدم ${validatedUsername}...`, stopButton);
         
-        activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
+        activeRecordings[validatedUsername] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
 
-        recordLiveStream(streamUrl, username, controller.signal)
+        recordLiveStream(streamUrl, validatedUsername, controller.signal)
             .then(async (finalMp4Path) => {
                 await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري رفع الفيديو إلى تليجرام...`);
                 await ctx.replyWithVideo({ source: finalMp4Path });
                 await ctx.reply('تم الرفع إلى تليجرام بنجاح. جاري الآن أرشفة الفيديو على Cloudinary...');
-                const cloudinaryResult = await uploadVideo(finalMp4Path, username);
-                await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
-                fs.unlinkSync(finalMp4Path);
+                
+                try {
+                    const cloudinaryResult = await uploadVideo(finalMp4Path, validatedUsername);
+                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
+                } catch (cloudinaryError) {
+                    console.error('[Bot] Cloudinary upload failed:', cloudinaryError);
+                    await ctx.reply('⚠️ تم إرسال الفيديو بنجاح ولكن فشلت الأرشفة على Cloudinary.');
+                }
+                
+                // Safe file deletion with error handling
+                try {
+                    fs.unlinkSync(finalMp4Path);
+                } catch (unlinkError) {
+                    console.error('[Bot] Failed to delete file:', unlinkError);
+                }
             })
             .catch(async (error) => {
-                console.error(`خطأ في عملية التسجيل لـ ${username}:`, error);
-                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ أثناء تسجيل ${username}.`);
+                console.error(`[Bot] Error recording ${validatedUsername}:`, error);
+                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ أثناء تسجيل ${validatedUsername}.`);
             })
             .finally(() => {
-                delete activeRecordings[username];
-                if (currentlyRecording.has(username)) {
-                    currentlyRecording.delete(username);
+                delete activeRecordings[validatedUsername];
+                if (currentlyRecording.has(validatedUsername)) {
+                    currentlyRecording.delete(validatedUsername);
                 }
             });
 
     } catch (error) {
-        console.error(error);
-        await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, 'حدث خطأ عام أثناء محاولة بدء التسجيل.');
+        console.error('[Bot] Error in handleRecordLive:', error);
+        await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, ERROR_MESSAGES.GENERAL_ERROR);
     }
 }
 
+/**
+ * Initializes and starts the bot application
+ */
 async function startApp() {
     try {
         await setupDatabase();
         startMonitoring(bot, handleRecordLive);
         bot.launch();
         console.log('البوت وخدمة المراقبة يعملان الآن...');
-        process.once('SIGINT', () => bot.stop('SIGINT'));
-        process.once('SIGTERM', () => bot.stop('SIGTERM'));
+        
+        // Graceful shutdown handlers
+        const shutdown = async (signal) => {
+            console.log(`[Shutdown] Received ${signal}, shutting down gracefully...`);
+            
+            // Stop accepting new updates
+            bot.stop(signal);
+            
+            // Clean up active recordings
+            for (const [username, recording] of Object.entries(activeRecordings)) {
+                console.log(`[Shutdown] Stopping recording for ${username}`);
+                recording.controller.abort();
+            }
+            
+            console.log('[Shutdown] Cleanup complete. Exiting...');
+            process.exit(0);
+        };
+        
+        process.once('SIGINT', () => shutdown('SIGINT'));
+        process.once('SIGTERM', () => shutdown('SIGTERM'));
     } catch (error) {
-        console.error("فشل بدء تشغيل التطبيق:", error);
+        console.error("[Startup] Failed to start application:", error);
         process.exit(1);
     }
 }
