@@ -1,4 +1,3 @@
-// استيراد مكتبة axios لإجراء طلبات الويب
 import axios from 'axios';
 
 /**
@@ -10,8 +9,6 @@ async function checkLiveStatus(username) {
         console.log(`[*] جاري التحقق من حالة المستخدم: ${username}...`);
 
         // --- الخطوة الأولى: الحصول على Room ID ---
-        // تيك توك يتطلب "طلبات موقعة" معقدة. نستخدم واجهة برمجة تطبيقات (API) وسيطة
-        // للحصول على رابط صالح لجلب معلومات المستخدم، بما في ذلك Room ID.
         const signedUrlResponse = await axios.get(`https://tikrec.com/tiktok/room/api/sign?unique_id=${username}`);
         const signedPath = signedUrlResponse.data.signed_path;
 
@@ -24,14 +21,12 @@ async function checkLiveStatus(username) {
 
         // الآن نستخدم الرابط الموقع لجلب معلومات المستخدم
         const roomInfoResponse = await axios.get(tiktokApiUrl, {
-            // إضافة هيدر مقلد للمتصفح لتجنب الحظر
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
             }
         });
         
         // استخراج Room ID من الرد
-        // نستخدم optional chaining (?.) للتأكد من عدم حدوث خطأ إذا كانت البيانات غير موجودة
         const roomId = roomInfoResponse.data?.data?.user?.roomId;
         
         // إذا لم يكن هناك Room ID، فالمستخدم غالباً ليس في بث مباشر
@@ -43,7 +38,6 @@ async function checkLiveStatus(username) {
         console.log(`[*] تم العثور على Room ID: ${roomId}. جاري التحقق من حالة البث...`);
 
         // --- الخطوة الثانية: التحقق من أن الغرفة نشطة (is_room_alive) ---
-        // هذه هي الخطوة النهائية للتأكد من أن البث فعال الآن
         const liveCheckUrl = `https://webcast.tiktok.com/webcast/room/check_alive/?aid=1988&room_ids=${roomId}`;
         const aliveCheckResponse = await axios.get(liveCheckUrl);
         
@@ -56,12 +50,10 @@ async function checkLiveStatus(username) {
         }
 
     } catch (error) {
-        // التعامل مع أي أخطاء قد تحدث (مشاكل في الشبكة، تغيير في API تيك توك، الخ)
+        // التعامل مع أي أخطاء قد تحدث
         if (error.response) {
-            // إذا كان الخطأ من الخادم (مثل 404, 500)
             console.error(`[!] حدث خطأ في الطلب: ${error.response.status} - ${error.response.statusText}`);
         } else {
-            // إذا كان الخطأ في الشبكة أو أي شيء آخر
             console.error('[!] حدث خطأ:', error.message);
         }
     }
@@ -76,7 +68,7 @@ const username = process.argv[2];
 if (!username) {
     console.log("Usage: node check_live.js <username>");
     console.log("Example: node check_live.js michele0303");
-    process.exit(1); // الخروج من البرنامج
+    process.exit(1);
 }
 
 // استدعاء الدالة الرئيسية
