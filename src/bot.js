@@ -2,6 +2,12 @@ import { Telegraf, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
+import dns from 'dns'; // <-- أضف هذا السطر
+
+// --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
+dns.setServers(['8.8.8.8', '1.1.1.1']);
+console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى Google & Cloudflare.');
+// -------------------------------------------------------------
 
 // استيراد كل دالة باسمها المحدد مباشرة
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
@@ -127,6 +133,11 @@ async function handleCheckStatus(ctx, username) {
     await ctx.reply(`جاري فحص حالة المستخدم "${username}"...`);
     try {
         const roomId = await getRoomId(username);
+        
+        // --- إضافة سطر التصحيح هنا ---
+        console.log(`[Bot Logic] القيمة العائدة من getRoomId هي: ${roomId}`);
+        // ---------------------------------
+
         if (!roomId || !(await isUserLive(roomId))) {
             await ctx.reply(`❌ المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
@@ -137,6 +148,7 @@ async function handleCheckStatus(ctx, username) {
         await ctx.reply('حدث خطأ أثناء محاولة فحص حالة المستخدم.');
     }
 }
+
 
 async function handleRecordLive(ctx, username) {
     if (activeRecordings[username]) {

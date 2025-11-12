@@ -1,19 +1,18 @@
-// استيراد مكتبات التعامل مع الملفات والمسارات
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
+import { fileURLToPath } from 'url'; // <-- استيراد الدالة المطلوبة
 import { convertFlvToMp4 } from '../utils/video.util.js';
 
-/**
- * يقوم بتسجيل بث مباشر من تيك توك وحفظه كملف MP4.
- * @param {string} streamUrl - رابط بث FLV المباشر.
- * @param {string} username - اسم المستخدم (لتسمية الملف).
- * @param {AbortSignal} signal - إشارة لإلغاء عملية التحميل.
- * @returns {Promise<string>} المسار الكامل لملف MP4 المسجل بعد التحويل.
- */
+// --- الحل: إنشاء __dirname بالطريقة الحديثة ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// ---------------------------------------------
+
 async function recordLiveStream(streamUrl, username, signal) {
     const timestamp = new Date().toISOString().replace(/:/g, '-').slice(0, 19);
-    const outputDir = path.join(__dirname, '..', '..', 'downloads');
+    // الآن outputDir سيعمل بشكل صحيح
+    const outputDir = path.join(__dirname, '..', '..', 'downloads'); 
     const tempFilePath = path.join(outputDir, `${username}_${timestamp}.flv`);
 
     if (!fs.existsSync(outputDir)) {
@@ -29,21 +28,12 @@ async function recordLiveStream(streamUrl, username, signal) {
             method: 'get',
             url: streamUrl,
             responseType: 'stream',
-            signal, // تمرير إشارة الإلغاء إلى axios
+            signal,
         });
 
         response.data.pipe(writer);
 
         return new Promise((resolve, reject) => {
-            const cleanup = () => {
-                 // التأكد من إزالة المستمعين لتجنب تسريب الذاكرة
-                writer.removeListener('finish', onFinish);
-                writer.removeListener('error', onError);
-                if (fs.existsSync(tempFilePath)) {
-                    fs.unlinkSync(tempFilePath);
-                }
-            };
-            
             const onFinish = async () => {
                 console.log(`[Recorder] انتهى التسجيل. حجم الملف المؤقت: ${(writer.bytesWritten / 1024 / 1024).toFixed(2)} MB`);
                 try {
@@ -55,16 +45,14 @@ async function recordLiveStream(streamUrl, username, signal) {
             };
             
             const onError = (err) => {
-                cleanup();
                 console.error('[Recorder] حدث خطأ أثناء كتابة الملف:', err);
                 reject(err);
             };
 
             signal.addEventListener('abort', () => {
                 console.log(`[Recorder] تم طلب إيقاف التسجيل للمستخدم: ${username}`);
-                writer.end(); // إنهاء الكتابة في الملف
-                response.data.destroy(); // إيقاف تحميل البيانات
-                // لا نرفض البروميس هنا، بل نتركه ينتهي بشكل طبيعي عبر 'finish'
+                writer.end();
+                response.data.destroy();
             });
 
             writer.on('finish', onFinish);
@@ -73,7 +61,6 @@ async function recordLiveStream(streamUrl, username, signal) {
     } catch (error) {
         if (axios.isCancel(error)) {
             console.log('[Recorder] تم إلغاء طلب التحميل بنجاح.');
-            // إذا كان الإلغاء ناجحًا، يجب أن نحول ما تم تحميله
              return convertFlvToMp4(tempFilePath);
         }
         writer.close();

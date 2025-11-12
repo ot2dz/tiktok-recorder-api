@@ -1,5 +1,5 @@
 // استيراد مكتبة axios لإجراء طلبات الويب
-const axios = require('axios');
+import axios from 'axios';
 
 /**
  * دالة للتحقق مما إذا كان مستخدم تيك توك في بث مباشر أم لا
