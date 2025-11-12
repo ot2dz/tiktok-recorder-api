@@ -1,13 +1,14 @@
-const { Telegraf, Markup } = require('telegraf');
-const { message } = require('telegraf/filters');
-const fs = require('fs');
-require('dotenv').config();
+import { Telegraf, Markup } from 'telegraf';
+import { message } from 'telegraf/filters';
+import fs from 'fs';
+import 'dotenv/config';
 
-const tiktokService = require('./services/tiktok.service');
-const recorderService = require('./core/recorder.service');
-const cloudinaryService = require('./services/cloudinary.service');
-const dbService = require('./services/db.service');
-const monitoringService = require('./core/monitoring.service');
+// استيراد كل دالة باسمها المحدد مباشرة
+import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
+import { recordLiveStream } from './core/recorder.service.js';
+import { uploadVideo } from './services/cloudinary.service.js';
+import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
+import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
     console.error('خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في ملف .env');
@@ -67,7 +68,7 @@ bot.action('remove_monitor', (ctx) => {
 
 bot.action('list_monitor', async (ctx) => {
     try {
-        const users = await dbService.getMonitoredUsers();
+        const users = await getMonitoredUsers();
         const userList = users
             .filter(u => u.chatId === ctx.chat.id)
             .map(u => `- @${u.username}`)
@@ -100,11 +101,11 @@ bot.on(message('text'), async (ctx) => {
             await handleRecordLive(ctx, username);
             break;
         case 'add_monitor':
-            await dbService.addUserToMonitor(username, chatId);
+            await addUserToMonitor(username, chatId);
             await ctx.reply(`✅ تم إضافة المستخدم "${username}" إلى قائمة المراقبة.`);
             break;
         case 'remove_monitor':
-            await dbService.removeUserFromMonitor(username, chatId);
+            await removeUserFromMonitor(username, chatId);
             await ctx.reply(`🗑️ تم حذف المستخدم "${username}" من قائمة المراقبة.`);
             break;
     }
@@ -125,8 +126,8 @@ bot.action(/stop_record_(.+)/, (ctx) => {
 async function handleCheckStatus(ctx, username) {
     await ctx.reply(`جاري فحص حالة المستخدم "${username}"...`);
     try {
-        const roomId = await tiktokService.getRoomId(username);
-        if (!roomId || !(await tiktokService.isUserLive(roomId))) {
+        const roomId = await getRoomId(username);
+        if (!roomId || !(await isUserLive(roomId))) {
             await ctx.reply(`❌ المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
         }
@@ -146,13 +147,13 @@ async function handleRecordLive(ctx, username) {
     const checkingMsg = await ctx.reply(`جاري التحقق من حالة ${username} قبل بدء التسجيل...`);
     
     try {
-        const roomId = await tiktokService.getRoomId(username);
-        if (!roomId || !(await tiktokService.isUserLive(roomId))) {
+        const roomId = await getRoomId(username);
+        if (!roomId || !(await isUserLive(roomId))) {
             await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `❌ لا يمكن بدء التسجيل. المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
         }
 
-        const streamUrl = await tiktokService.getLiveStreamUrl(roomId);
+        const streamUrl = await getLiveStreamUrl(roomId);
         if (!streamUrl) {
             await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, 'حدث خطأ: لم يتم العثور على رابط البث.');
             return;
@@ -167,12 +168,12 @@ async function handleRecordLive(ctx, username) {
         
         activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
 
-        recorderService.recordLiveStream(streamUrl, username, controller.signal)
+        recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
                 await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري رفع الفيديو إلى تليجرام...`);
                 await ctx.replyWithVideo({ source: finalMp4Path });
                 await ctx.reply('تم الرفع إلى تليجرام بنجاح. جاري الآن أرشفة الفيديو على Cloudinary...');
-                const cloudinaryResult = await cloudinaryService.uploadVideo(finalMp4Path, username);
+                const cloudinaryResult = await uploadVideo(finalMp4Path, username);
                 await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
                 fs.unlinkSync(finalMp4Path);
             })
@@ -182,8 +183,8 @@ async function handleRecordLive(ctx, username) {
             })
             .finally(() => {
                 delete activeRecordings[username];
-                if (monitoringService.currentlyRecording.has(username)) {
-                    monitoringService.currentlyRecording.delete(username);
+                if (currentlyRecording.has(username)) {
+                    currentlyRecording.delete(username);
                 }
             });
 
@@ -193,34 +194,20 @@ async function handleRecordLive(ctx, username) {
     }
 }
 
-// ===============================================
-// ||         نقطة بداية تشغيل التطبيق         ||
-// ===============================================
-
 async function startApp() {
     try {
-        // الخطوة 1: انتظر حتى يتم إعداد قاعدة البيانات بالكامل
-        await dbService.setupDatabase();
-
-        // الخطوة 2: الآن بعد أن أصبحت قاعدة البيانات جاهزة، قم بتشغيل خدمة المراقبة
-        monitoringService.startMonitoring(bot, handleRecordLive); // نمرر دالة التسجيل
-
-        // الخطوة 3: قم بتشغيل البوت لاستقبال الرسائل
+        await setupDatabase();
+        startMonitoring(bot, handleRecordLive);
         bot.launch();
         console.log('البوت وخدمة المراقبة يعملان الآن...');
-
-        // تمكين الإيقاف الآمن
         process.once('SIGINT', () => bot.stop('SIGINT'));
         process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
     } catch (error) {
         console.error("فشل بدء تشغيل التطبيق:", error);
         process.exit(1);
     }
 }
 
-// استدعاء دالة بدء التشغيل
 startApp();
 
-// جعل دالة التسجيل قابلة للتصدير لاستخدامها في خدمة المراقبة
-module.exports = { handleRecordLive };
+export { handleRecordLive };

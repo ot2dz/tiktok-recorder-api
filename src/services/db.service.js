@@ -1,14 +1,17 @@
-const path = require('path');
-const { JSONFile } = require('lowdb/node');
+import { Low } from 'lowdb';
+import { JSONFile } from 'lowdb/node';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// الحصول على __dirname في ES Module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // متغير لتخزين قاعدة البيانات بعد تحميلها بشكل غير متزامن
 let db;
 
 // دالة لتهيئة قاعدة البيانات بالقيمة الافتراضية إذا كانت فارغة
-async function setupDatabase() {
-    // نستخدم dynamic import() لأن lowdb هي ES Module
-    const { Low } = await import('lowdb');
-    
+export async function setupDatabase() {
     const dbPath = path.join(__dirname, '..', '..', 'db.json');
     const adapter = new JSONFile(dbPath);
     db = new Low(adapter, { monitoredUsers: [] }); // إضافة البيانات الافتراضية هنا
@@ -20,7 +23,7 @@ async function setupDatabase() {
 }
 
 // دالة لإضافة مستخدم إلى قائمة المراقبة
-async function addUserToMonitor(username, chatId) {
+export async function addUserToMonitor(username, chatId) {
     await db.read();
     const exists = db.data.monitoredUsers.some(u => u.username === username && u.chatId === chatId);
     if (!exists) {
@@ -30,21 +33,14 @@ async function addUserToMonitor(username, chatId) {
 }
 
 // دالة لحذف مستخدم من قائمة المراقبة
-async function removeUserFromMonitor(username, chatId) {
+export async function removeUserFromMonitor(username, chatId) {
     await db.read();
     db.data.monitoredUsers = db.data.monitoredUsers.filter(u => !(u.username === username && u.chatId === chatId));
     await db.write();
 }
 
 // دالة لجلب كل المستخدمين المراقبين
-async function getMonitoredUsers() {
+export async function getMonitoredUsers() {
     await db.read();
     return db.data.monitoredUsers;
 }
-
-module.exports = {
-    setupDatabase,
-    addUserToMonitor,
-    removeUserFromMonitor,
-    getMonitoredUsers
-};

@@ -1,11 +1,8 @@
 // استيراد مكتبات التعامل مع المسارات والملفات
-const fs = require('fs');
-const path = require('path');
-
-// استيراد مكتبة FFmpeg
-const ffmpeg = require('fluent-ffmpeg');
-// تحديد مسار FFmpeg الثابت الذي قمنا بتثبيته
-const ffmpegStatic = require('ffmpeg-static');
+import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStatic from 'ffmpeg-static';
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 /**
@@ -47,6 +44,6 @@ function convertFlvToMp4(flvFilePath) {
     });
 }
 
-module.exports = {
+export {
     convertFlvToMp4
 };

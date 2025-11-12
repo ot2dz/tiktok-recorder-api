@@ -1,5 +1,5 @@
-const tiktokService = require('../services/tiktok.service');
-const dbService = require('../services/db.service');
+import * as tiktokService from '../services/tiktok.service.js';
+import * as dbService from '../services/db.service.js';
 
 // مجموعة لتتبع المستخدمين الذين يتم تسجيلهم حاليًا لمنع التسجيل المزدوج
 const currentlyRecording = new Set();
@@ -52,4 +52,4 @@ function startMonitoring(bot, recordFunction) {
     checkMonitoredUsers(bot);
 }
 
-module.exports = { startMonitoring, currentlyRecording };
+export { startMonitoring, currentlyRecording };

@@ -223,6 +223,20 @@ if (!username) {
 checkLiveStatus(username);
 ```
 
+# db.json
+
+```json
+{
+  "monitoredUsers": [
+    {
+      "username": "narimane.__.fn",
+      "chatId": 1077656944,
+      "isRecording": false
+    }
+  ]
+}
+```
+
 # package.json
 
 ```json
@@ -230,6 +244,7 @@ checkLiveStatus(username);
   "name": "tiktok-recorder-bot",
   "version": "1.0.0",
   "description": "Telegram bot for recording TikTok live streams",
+  "type": "module",
   "main": "src/bot.js",
   "scripts": {
     "start": "node src/bot.js",
@@ -251,6 +266,7 @@ checkLiveStatus(username);
     "dotenv": "^16.3.1",
     "ffmpeg-static": "^5.2.0",
     "fluent-ffmpeg": "^2.1.2",
+    "lowdb": "^7.0.1",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
@@ -263,14 +279,16 @@ checkLiveStatus(username);
 # src/bot.js
 
 ```js
-const { Telegraf, Markup } = require('telegraf');
-const { message } = require('telegraf/filters');
-const fs = require('fs');
-require('dotenv').config();
+import { Telegraf, Markup } from 'telegraf';
+import { message } from 'telegraf/filters';
+import fs from 'fs';
+import 'dotenv/config';
 
-const tiktokService = require('./services/tiktok.service');
-const recorderService = require('./core/recorder.service');
-const cloudinaryService = require('./services/cloudinary.service');
+import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
+import { recordLiveStream } from './core/recorder.service.js';
+import { uploadVideo } from './services/cloudinary.service.js';
+import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
+import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
     console.error('خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في ملف .env');
@@ -278,16 +296,16 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
 const userState = {};
-const activeRecordings = {}; // لتتبع التسجيلات النشطة
+const activeRecordings = {};
 
 const CHECK_STATUS_BTN = '🔍 فحص حالة البث';
 const RECORD_LIVE_BTN = '🔴 بدء تسجيل بث';
+const MANAGE_MONITOR_BTN = '⚙️ إدارة المراقبة';
 
 const mainKeyboard = Markup.keyboard([
-    [CHECK_STATUS_BTN],
-    [RECORD_LIVE_BTN]
+    [CHECK_STATUS_BTN, RECORD_LIVE_BTN],
+    [MANAGE_MONITOR_BTN]
 ]).resize();
 
 bot.start((ctx) => {
@@ -307,19 +325,41 @@ bot.hears(RECORD_LIVE_BTN, (ctx) => {
     ctx.reply('حسناً، أرسل الآن اسم المستخدم على تيك توك الذي تريد بدء تسجيله.');
 });
 
-// معالج زر إيقاف التسجيل
-bot.action(/stop_record_(.+)/, (ctx) => {
-    const username = ctx.match[1];
-    const recording = activeRecordings[username];
+bot.hears(MANAGE_MONITOR_BTN, (ctx) => {
+    const monitorKeyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('➕ إضافة مستخدم للمراقبة', 'add_monitor')],
+        [Markup.button.callback('🗑️ حذف مستخدم من المراقبة', 'remove_monitor')],
+        [Markup.button.callback('📋 عرض القائمة', 'list_monitor')]
+    ]);
+    ctx.reply('اختر الإجراء المطلوب:', monitorKeyboard);
+});
 
-    if (recording && recording.controller) {
-        ctx.answerCbQuery(`جاري إيقاف تسجيل ${username}...`);
-        recording.controller.abort(); // إرسال إشارة الإيقاف
-        delete activeRecordings[username];
-        ctx.editMessageText(`تم طلب إيقاف التسجيل للمستخدم ${username}. سيتم إرسال الفيديو المسجل قريبًا.`);
-    } else {
-        ctx.answerCbQuery('لم يتم العثور على عملية تسجيل نشطة لهذا المستخدم.');
+bot.action('add_monitor', (ctx) => {
+    userState[ctx.chat.id] = 'add_monitor';
+    ctx.reply('أرسل الآن اسم المستخدم الذي تريد إضافته إلى قائمة المراقبة.');
+    ctx.answerCbQuery();
+});
+
+bot.action('remove_monitor', (ctx) => {
+    userState[ctx.chat.id] = 'remove_monitor';
+    ctx.reply('أرسل الآن اسم المستخدم الذي تريد حذفه من قائمة المراقبة.');
+    ctx.answerCbQuery();
+});
+
+bot.action('list_monitor', async (ctx) => {
+    try {
+        const users = await dbService.getMonitoredUsers();
+        const userList = users
+            .filter(u => u.chatId === ctx.chat.id)
+            .map(u => `- @${u.username}`)
+            .join('\n');
+        
+        await ctx.reply(userList ? `قائمة المستخدمين قيد المراقبة:\n${userList}` : 'قائمة المراقبة فارغة.');
+    } catch (error) {
+        console.error("Error listing monitored users:", error);
+        await ctx.reply('حدث خطأ أثناء جلب القائمة.');
     }
+    await ctx.answerCbQuery();
 });
 
 bot.on(message('text'), async (ctx) => {
@@ -331,7 +371,6 @@ bot.on(message('text'), async (ctx) => {
         ctx.reply('الرجاء اختيار أحد الخيارات من القائمة أولاً.', mainKeyboard);
         return;
     }
-
     delete userState[chatId];
 
     switch (currentState) {
@@ -341,14 +380,34 @@ bot.on(message('text'), async (ctx) => {
         case 'record_live':
             await handleRecordLive(ctx, username);
             break;
+        case 'add_monitor':
+            await dbService.addUserToMonitor(username, chatId);
+            await ctx.reply(`✅ تم إضافة المستخدم "${username}" إلى قائمة المراقبة.`);
+            break;
+        case 'remove_monitor':
+            await dbService.removeUserFromMonitor(username, chatId);
+            await ctx.reply(`🗑️ تم حذف المستخدم "${username}" من قائمة المراقبة.`);
+            break;
+    }
+});
+
+bot.action(/stop_record_(.+)/, (ctx) => {
+    const username = ctx.match[1];
+    const recording = activeRecordings[username];
+    if (recording && recording.controller) {
+        ctx.answerCbQuery(`جاري إيقاف تسجيل ${username}...`);
+        recording.controller.abort();
+        ctx.editMessageText(`تم طلب إيقاف التسجيل للمستخدم ${username}. سيتم إرسال الفيديو المسجل قريبًا.`);
+    } else {
+        ctx.answerCbQuery('لم يتم العثور على عملية تسجيل نشطة لهذا المستخدم.');
     }
 });
 
 async function handleCheckStatus(ctx, username) {
     await ctx.reply(`جاري فحص حالة المستخدم "${username}"...`);
     try {
-        const roomId = await tiktokService.getRoomId(username);
-        if (!roomId || !(await tiktokService.isUserLive(roomId))) {
+        const roomId = await getRoomId(username);
+        if (!roomId || !(await isUserLive(roomId))) {
             await ctx.reply(`❌ المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
         }
@@ -360,7 +419,6 @@ async function handleCheckStatus(ctx, username) {
 }
 
 async function handleRecordLive(ctx, username) {
-    // التحقق مما إذا كان هناك تسجيل جاري لنفس المستخدم
     if (activeRecordings[username]) {
         await ctx.reply(`يوجد بالفعل عملية تسجيل جارية للمستخدم ${username}.`);
         return;
@@ -369,15 +427,13 @@ async function handleRecordLive(ctx, username) {
     const checkingMsg = await ctx.reply(`جاري التحقق من حالة ${username} قبل بدء التسجيل...`);
     
     try {
-        // 1. التحقق من أن المستخدم في بث مباشر
-        const roomId = await tiktokService.getRoomId(username);
-        if (!roomId || !(await tiktokService.isUserLive(roomId))) {
+        const roomId = await getRoomId(username);
+        if (!roomId || !(await isUserLive(roomId))) {
             await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `❌ لا يمكن بدء التسجيل. المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
         }
 
-        // 2. جلب رابط البث
-        const streamUrl = await tiktokService.getLiveStreamUrl(roomId);
+        const streamUrl = await getLiveStreamUrl(roomId);
         if (!streamUrl) {
             await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, 'حدث خطأ: لم يتم العثور على رابط البث.');
             return;
@@ -390,47 +446,26 @@ async function handleRecordLive(ctx, username) {
 
         const recordingMsg = await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `🔴 بدأ تسجيل البث للمستخدم ${username}...`, stopButton);
         
-        // حفظ معلومات العملية
-        activeRecordings[username] = { controller, messageId: recordingMsg.message_id };
+        activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
 
-        // 3. بدء التسجيل (لا نستخدم await هنا لتجنب حجب البوت)
-        recorderService.recordLiveStream(streamUrl, username, controller.signal)
+        recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
-                try {
-                    // 1. إعلام المستخدم بانتهاء التسجيل والبدء في الرفع
-                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري رفع الفيديو إلى تليجرام...`);
-                    
-                    // 2. رفع الفيديو إلى تليجرام
-                    await ctx.replyWithVideo({ source: finalMp4Path });
-
-                    // 3. إعلام المستخدم بالبدء في الرفع إلى Cloudinary
-                    await ctx.reply('تم الرفع إلى تليجرام بنجاح. جاري الآن أرشفة الفيديو على Cloudinary...');
-                    
-                    // 4. رفع الفيديو إلى Cloudinary
-                    const cloudinaryResult = await cloudinaryService.uploadVideo(finalMp4Path, username);
-
-                    // 5. إرسال تأكيد ورابط Cloudinary
-                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
-
-                } catch (uploadError) {
-                    // التعامل مع أخطاء الرفع
-                    console.error("خطأ أثناء الرفع (تليجرام أو Cloudinary):", uploadError);
-                    await ctx.reply('حدث خطأ أثناء رفع الفيديو بعد تسجيله.');
-                } finally {
-                    // 6. حذف الملف المحلي في كل الحالات (نجاح أو فشل الرفع)
-                    // طالما أن التسجيل نفسه قد نجح
-                    console.log(`[FS] جاري حذف الملف المحلي: ${finalMp4Path}`);
-                    fs.unlinkSync(finalMp4Path);
-                }
+                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري رفع الفيديو إلى تليجرام...`);
+                await ctx.replyWithVideo({ source: finalMp4Path });
+                await ctx.reply('تم الرفع إلى تليجرام بنجاح. جاري الآن أرشفة الفيديو على Cloudinary...');
+                const cloudinaryResult = await uploadVideo(finalMp4Path, username);
+                await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
+                fs.unlinkSync(finalMp4Path);
             })
             .catch(async (error) => {
-                // 5. في حالة حدوث خطأ
                 console.error(`خطأ في عملية التسجيل لـ ${username}:`, error);
                 await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ أثناء تسجيل ${username}.`);
             })
             .finally(() => {
-                // 6. تنظيف الحالة بغض النظر عن النتيجة
                 delete activeRecordings[username];
+                if (monitoringService.currentlyRecording.has(username)) {
+                    monitoringService.currentlyRecording.delete(username);
+                }
             });
 
     } catch (error) {
@@ -439,11 +474,37 @@ async function handleRecordLive(ctx, username) {
     }
 }
 
-bot.launch();
-console.log('البوت يعمل الآن...');
+// ===============================================
+// ||         نقطة بداية تشغيل التطبيق         ||
+// ===============================================
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+async function startApp() {
+    try {
+        // الخطوة 1: انتظر حتى يتم إعداد قاعدة البيانات بالكامل
+        await dbService.setupDatabase();
+
+        // الخطوة 2: الآن بعد أن أصبحت قاعدة البيانات جاهزة، قم بتشغيل خدمة المراقبة
+        monitoringService.startMonitoring(bot, handleRecordLive); // نمرر دالة التسجيل
+
+        // الخطوة 3: قم بتشغيل البوت لاستقبال الرسائل
+        bot.launch();
+        console.log('البوت وخدمة المراقبة يعملان الآن...');
+
+        // تمكين الإيقاف الآمن
+        process.once('SIGINT', () => bot.stop('SIGINT'));
+        process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+    } catch (error) {
+        console.error("فشل بدء تشغيل التطبيق:", error);
+        process.exit(1);
+    }
+}
+
+// استدعاء دالة بدء التشغيل
+startApp();
+
+// جعل دالة التسجيل قابلة للتصدير لاستخدامها في خدمة المراقبة
+export { handleRecordLive };
 ```
 
 # src/config/env.js
@@ -452,14 +513,74 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 ```
 
+# src/core/monitoring.service.js
+
+```js
+import { getRoomId, isUserLive, getLiveStreamUrl } from '../services/tiktok.service.js';
+import { getMonitoredUsers, addUserToMonitor, removeUserFromMonitor } from '../services/db.service.js';
+
+// مجموعة لتتبع المستخدمين الذين يتم تسجيلهم حاليًا لمنع التسجيل المزدوج
+const currentlyRecording = new Set();
+
+let handleRecordLive; // متغير لتخزين الدالة
+
+/**
+ * دالة تقوم بفحص قائمة المراقبة مرة واحدة
+ * @param {Telegraf} bot - نسخة البوت لإرسال الإشعارات والتسجيل
+ */
+async function checkMonitoredUsers(bot) {
+    console.log('[Monitor] بدء جولة فحص جديدة...');
+    const users = await getMonitoredUsers();
+
+    for (const user of users) {
+        if (currentlyRecording.has(user.username)) continue;
+
+        try {
+            const roomId = await getRoomId(user.username);
+            if (roomId && await isUserLive(roomId)) {
+                console.log(`[Monitor] اكتشاف بث مباشر للمستخدم: ${user.username}!`);
+                
+                await bot.telegram.sendMessage(user.chatId, `🔔 تم اكتشاف بث مباشر للمستخدم "${user.username}". بدء التسجيل التلقائي...`);
+                currentlyRecording.add(user.username);
+                
+                // إنشاء كائن context مزيف يشبه الذي يرسله تليجرام
+                const fakeContext = {
+                    chat: { id: user.chatId },
+                    reply: (text) => bot.telegram.sendMessage(user.chatId, text)
+                };
+                
+                // استدعاء دالة التسجيل التي تم تمريرها
+                handleRecordLive(fakeContext, user.username);
+            }
+        } catch (error) {
+            console.error(`[Monitor] خطأ أثناء فحص المستخدم ${user.username}:`, error);
+        }
+    }
+}
+
+/**
+ * تبدأ حلقة المراقبة الدورية
+ * @param {Telegraf} bot 
+ * @param {Function} recordFunction - دالة handleRecordLive من bot.js
+ */
+function startMonitoring(bot, recordFunction) {
+    handleRecordLive = recordFunction; // تخزين الدالة للاستخدام
+    console.log('[Monitor] تم تفعيل خدمة المراقبة.');
+    setInterval(() => checkMonitoredUsers(bot), 300000);
+    checkMonitoredUsers(bot);
+}
+
+export { startMonitoring, currentlyRecording };
+```
+
 # src/core/recorder.service.js
 
 ```js
 // استيراد مكتبات التعامل مع الملفات والمسارات
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const { convertFlvToMp4 } = require('../utils/video.util');
+import fs from 'fs';
+import path from 'path';
+import axios from 'axios';
+import { convertFlvToMp4 } from '../utils/video.util.js';
 
 /**
  * يقوم بتسجيل بث مباشر من تيك توك وحفظه كملف MP4.
@@ -541,7 +662,7 @@ async function recordLiveStream(streamUrl, username, signal) {
     }
 }
 
-module.exports = { recordLiveStream };
+export { recordLiveStream };
 ```
 
 # src/index.js
@@ -554,12 +675,12 @@ module.exports = { recordLiveStream };
 
 ```js
 // استيراد مكتبة cloudinary
-const cloudinary = require('cloudinary');
+import { v2 as cloudinary } from 'cloudinary';
 // استيراد dotenv للتأكد من تحميل متغيرات البيئة
-require('dotenv').config();
+import 'dotenv/config';
 
 // إعداد Cloudinary باستخدام متغيرات البيئة
-cloudinary.v2.config({
+cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
@@ -592,15 +713,66 @@ async function uploadVideo(filePath, publicId) {
     }
 }
 
-module.exports = {
+export {
     uploadVideo
 };
+```
+
+# src/services/db.service.js
+
+```js
+import { Low } from 'lowdb';
+import { JSONFile } from 'lowdb/node';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// الحصول على __dirname في ES Module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// متغير لتخزين قاعدة البيانات بعد تحميلها بشكل غير متزامن
+let db;
+
+// دالة لتهيئة قاعدة البيانات بالقيمة الافتراضية إذا كانت فارغة
+export async function setupDatabase() {
+    const dbPath = path.join(__dirname, '..', '..', 'db.json');
+    const adapter = new JSONFile(dbPath);
+    db = new Low(adapter, { monitoredUsers: [] }); // إضافة البيانات الافتراضية هنا
+
+    await db.read();
+    db.data ||= { monitoredUsers: [] }; // القيمة الافتراضية
+    await db.write();
+    console.log('[DB] تم إعداد قاعدة البيانات بنجاح.');
+}
+
+// دالة لإضافة مستخدم إلى قائمة المراقبة
+export async function addUserToMonitor(username, chatId) {
+    await db.read();
+    const exists = db.data.monitoredUsers.some(u => u.username === username && u.chatId === chatId);
+    if (!exists) {
+        db.data.monitoredUsers.push({ username, chatId, isRecording: false });
+        await db.write();
+    }
+}
+
+// دالة لحذف مستخدم من قائمة المراقبة
+export async function removeUserFromMonitor(username, chatId) {
+    await db.read();
+    db.data.monitoredUsers = db.data.monitoredUsers.filter(u => !(u.username === username && u.chatId === chatId));
+    await db.write();
+}
+
+// دالة لجلب كل المستخدمين المراقبين
+export async function getMonitoredUsers() {
+    await db.read();
+    return db.data.monitoredUsers;
+}
 ```
 
 # src/services/tiktok.service.js
 
 ```js
-const axios = require('axios');
+import axios from 'axios';
 // --- تطبيق مبدأ DRY ---
 // إنشاء نسخة من axios مهيأة مسبقًا لاستخدامها في جميع الطلبات
 // هذا يمنع تكرار كتابة الهيدرز (Headers) في كل مرة
@@ -699,10 +871,10 @@ return null;
 }
 }
 // تصدير الدوال لجعلها متاحة للاستخدام في ملفات أخرى
-module.exports = {
-getRoomId,
-isUserLive,
-getLiveStreamUrl,
+export {
+    getRoomId,
+    isUserLive,
+    getLiveStreamUrl,
 };
 ```
 
@@ -716,13 +888,10 @@ getLiveStreamUrl,
 
 ```js
 // استيراد مكتبات التعامل مع المسارات والملفات
-const fs = require('fs');
-const path = require('path');
-
-// استيراد مكتبة FFmpeg
-const ffmpeg = require('fluent-ffmpeg');
-// تحديد مسار FFmpeg الثابت الذي قمنا بتثبيته
-const ffmpegStatic = require('ffmpeg-static');
+import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStatic from 'ffmpeg-static';
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 /**
@@ -764,7 +933,7 @@ function convertFlvToMp4(flvFilePath) {
     });
 }
 
-module.exports = {
+export {
     convertFlvToMp4
 };
 ```

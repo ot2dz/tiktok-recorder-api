@@ -1,4 +1,4 @@
-const axios = require('axios');
+import axios from 'axios';
 // --- تطبيق مبدأ DRY ---
 // إنشاء نسخة من axios مهيأة مسبقًا لاستخدامها في جميع الطلبات
 // هذا يمنع تكرار كتابة الهيدرز (Headers) في كل مرة
@@ -97,8 +97,8 @@ return null;
 }
 }
 // تصدير الدوال لجعلها متاحة للاستخدام في ملفات أخرى
-module.exports = {
-getRoomId,
-isUserLive,
-getLiveStreamUrl,
+export {
+    getRoomId,
+    isUserLive,
+    getLiveStreamUrl,
 };

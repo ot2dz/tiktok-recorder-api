@@ -1,8 +1,8 @@
 // استيراد مكتبات التعامل مع الملفات والمسارات
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const { convertFlvToMp4 } = require('../utils/video.util');
+import fs from 'fs';
+import path from 'path';
+import axios from 'axios';
+import { convertFlvToMp4 } from '../utils/video.util.js';
 
 /**
  * يقوم بتسجيل بث مباشر من تيك توك وحفظه كملف MP4.
@@ -84,4 +84,4 @@ async function recordLiveStream(streamUrl, username, signal) {
     }
 }
 
-module.exports = { recordLiveStream };
+export { recordLiveStream };
