@@ -2,19 +2,18 @@ import { Telegraf, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
-import dns from 'dns'; // <-- أضف هذا السطر
+import dns from 'dns';
 
 // --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
 dns.setServers(['8.8.8.8', '1.1.1.1']);
 console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى Google & Cloudflare.');
-// -------------------------------------------------------------
 
-// استيراد كل دالة باسمها المحدد مباشرة
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideo } from './services/cloudinary.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
+
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
     console.error('خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في ملف .env');
@@ -133,11 +132,6 @@ async function handleCheckStatus(ctx, username) {
     await ctx.reply(`جاري فحص حالة المستخدم "${username}"...`);
     try {
         const roomId = await getRoomId(username);
-        
-        // --- إضافة سطر التصحيح هنا ---
-        console.log(`[Bot Logic] القيمة العائدة من getRoomId هي: ${roomId}`);
-        // ---------------------------------
-
         if (!roomId || !(await isUserLive(roomId))) {
             await ctx.reply(`❌ المستخدم "${username}" ليس في بث مباشر حالياً.`);
             return;
@@ -148,7 +142,6 @@ async function handleCheckStatus(ctx, username) {
         await ctx.reply('حدث خطأ أثناء محاولة فحص حالة المستخدم.');
     }
 }
-
 
 async function handleRecordLive(ctx, username) {
     if (activeRecordings[username]) {
@@ -180,18 +173,45 @@ async function handleRecordLive(ctx, username) {
         
         activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
 
+        // ---  هنا يبدأ المنطق الجديد والمحسن ---
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
-                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري رفع الفيديو إلى تليجرام...`);
-                await ctx.replyWithVideo({ source: finalMp4Path });
-                await ctx.reply('تم الرفع إلى تليجرام بنجاح. جاري الآن أرشفة الفيديو على Cloudinary...');
-                const cloudinaryResult = await uploadVideo(finalMp4Path, username);
-                await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح!\nالرابط الدائم: ${cloudinaryResult.secure_url}`);
-                fs.unlinkSync(finalMp4Path);
+                try {
+                    // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
+                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري أرشفة الفيديو ومعالجته...`);
+                    
+                    // الخطوة 2: الأرشفة أولاً - الرفع إلى Cloudinary
+                    const cloudinaryResult = await uploadVideo(finalMp4Path, username);
+                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح على Cloudinary.`);
+
+                    // الخطوة 3: التحقق من الحجم
+                    const fileStats = fs.statSync(finalMp4Path);
+                    const fileSizeInMB = fileStats.size / (1024 * 1024);
+                    const telegramLimitMB = 50;
+
+                    // الخطوة 4: الإرسال المشروط إلى تليجرام
+                    if (fileSizeInMB <= telegramLimitMB) {
+                        await ctx.reply('حجم الملف مناسب، جاري إرساله مباشرة...');
+                        await ctx.replyWithVideo({ source: finalMp4Path });
+                    } else {
+                        await ctx.reply(
+                            `🎥 حجم الفيديو (${fileSizeInMB.toFixed(2)} MB) يتجاوز حد تليجرام (${telegramLimitMB} MB).\n\n` +
+                            `يمكنك مشاهدته أو تحميله مباشرة من الرابط الدائم:\n${cloudinaryResult.secure_url}`
+                        );
+                    }
+
+                } catch (processingError) {
+                    console.error("خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
+                    await ctx.reply('حدث خطأ أثناء معالجة الفيديو بعد تسجيله. تم حفظه على Cloudinary.');
+                } finally {
+                    // الخطوة 5: التنظيف دائمًا بعد نجاح الأرشفة
+                    console.log(`[FS] جاري حذف الملف المحلي: ${finalMp4Path}`);
+                    fs.unlinkSync(finalMp4Path);
+                }
             })
             .catch(async (error) => {
                 console.error(`خطأ في عملية التسجيل لـ ${username}:`, error);
-                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ أثناء تسجيل ${username}.`);
+                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ فادح أثناء تسجيل ${username}.`);
             })
             .finally(() => {
                 delete activeRecordings[username];
