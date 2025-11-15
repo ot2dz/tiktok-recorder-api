@@ -173,16 +173,24 @@ async function handleRecordLive(ctx, username) {
         
         activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
 
-        // ---  هنا يبدأ المنطق الجديد والمحسن ---
+        // ---  منطق محسّن مع حماية من حذف الملفات قبل رفعها ---
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
+                let uploadSuccessful = false;
+                let cloudinaryResult = null;
+
                 try {
                     // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
                     await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري أرشفة الفيديو ومعالجته...`);
                     
                     // الخطوة 2: الأرشفة أولاً - الرفع إلى Cloudinary
-                    const cloudinaryResult = await uploadVideo(finalMp4Path, username);
-                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح على Cloudinary.`);
+                    console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudinary: ${finalMp4Path}`);
+                    cloudinaryResult = await uploadVideo(finalMp4Path, username);
+                    
+                    // ✅ تأكيد نجاح الرفع
+                    uploadSuccessful = true;
+                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى Cloudinary`);
+                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح على Cloudinary.\n🔗 الرابط: ${cloudinaryResult.secure_url}`);
 
                     // الخطوة 3: التحقق من الحجم
                     const fileStats = fs.statSync(finalMp4Path);
@@ -196,24 +204,48 @@ async function handleRecordLive(ctx, username) {
                     } else {
                         await ctx.reply(
                             `🎥 حجم الفيديو (${fileSizeInMB.toFixed(2)} MB) يتجاوز حد تليجرام (${telegramLimitMB} MB).\n\n` +
-                            `يمكنك مشاهدته أو تحميله مباشرة من الرابط الدائم:\n${cloudinaryResult.secure_url}`
+                            `يمكنك مشاهدته أو تحميله مباشرة من الرابط أعلاه ⬆️`
                         );
                     }
 
                 } catch (processingError) {
-                    console.error("خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
-                    await ctx.reply('حدث خطأ أثناء معالجة الفيديو بعد تسجيله. تم حفظه على Cloudinary.');
+                    console.error("❌ خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
+                    
+                    if (!uploadSuccessful) {
+                        // فشل الرفع - لا تحذف الملف!
+                        await ctx.reply(
+                            `⚠️ حدث خطأ أثناء رفع الفيديو إلى Cloudinary.\n` +
+                            `📁 تم الاحتفاظ بالملف محلياً: ${finalMp4Path}\n` +
+                            `🔄 سيتم إعادة المحاولة لاحقاً.`
+                        );
+                        console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف لعدم نجاح الرفع: ${finalMp4Path}`);
+                        return; // الخروج بدون حذف الملف
+                    } else {
+                        // نجح الرفع لكن فشل الإرسال إلى تليجرام
+                        await ctx.reply(
+                            `⚠️ تم رفع الفيديو بنجاح لكن حدث خطأ أثناء إرساله.\n` +
+                            `🔗 يمكنك الوصول إليه من: ${cloudinaryResult?.secure_url}`
+                        );
+                    }
                 } finally {
-                    // الخطوة 5: التنظيف دائمًا بعد نجاح الأرشفة
-                    console.log(`[FS] جاري حذف الملف المحلي: ${finalMp4Path}`);
-                    fs.unlinkSync(finalMp4Path);
+                    // الخطوة 5: الحذف فقط إذا تم الرفع بنجاح
+                    if (uploadSuccessful && fs.existsSync(finalMp4Path)) {
+                        console.log(`[Cleanup] 🗑️ حذف الملف المحلي بعد نجاح الرفع: ${finalMp4Path}`);
+                        try {
+                            fs.unlinkSync(finalMp4Path);
+                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بنجاح`);
+                        } catch (deleteError) {
+                            console.error(`[Cleanup] ⚠️ فشل حذف الملف: ${deleteError.message}`);
+                        }
+                    }
                 }
             })
             .catch(async (error) => {
-                console.error(`خطأ في عملية التسجيل لـ ${username}:`, error);
-                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `حدث خطأ فادح أثناء تسجيل ${username}.`);
+                console.error(`❌ خطأ في عملية التسجيل لـ ${username}:`, error);
+                await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `❌ حدث خطأ فادح أثناء تسجيل ${username}.`);
             })
             .finally(() => {
+                // تنظيف حالة التسجيل
                 delete activeRecordings[username];
                 if (currentlyRecording.has(username)) {
                     currentlyRecording.delete(username);
