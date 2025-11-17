@@ -11,6 +11,9 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+token.json
+oauth-credentials.json
+google-credentials.json
 # Logs
 logs
 *.log
