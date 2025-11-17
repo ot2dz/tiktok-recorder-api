@@ -1,5 +1,3 @@
-// src/services/drive.service.js
-
 import { google } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
@@ -9,55 +7,57 @@ import 'dotenv/config';
 let drive = null;
 
 /**
- * تهيئة Google Drive API باستخدام OAuth 2.0 (المصادقة باسم المستخدم).
- * هذه هي الدالة الجديدة والمحدثة.
+ * تهيئة Google Drive API باستخدام متغيرات البيئة (الطريقة الاحترافية).
+ * يقوم بقراءة البيانات من .env وإنشاء عميل مصادقة جاهز للاستخدام.
  */
 async function initializeDrive() {
-    // إذا تم تهيئة drive من قبل، قم بإرجاعه مباشرة
+    // إذا تم تهيئة drive من قبل، قم بإرجاعه مباشرة لتجنب العمليات المكررة
     if (drive) return drive;
 
     try {
-        // 1. قراءة بيانات اعتماد OAuth من الملف
-        const credentialsPath = path.resolve(process.cwd(), 'oauth-credentials.json');
-        if (!fs.existsSync(credentialsPath)) {
-            throw new Error('لم يتم العثور على ملف oauth-credentials.json. يرجى التأكد من وجوده في المجلد الرئيسي.');
+        // 1. قراءة بيانات الاعتماد مباشرة من process.env
+        const clientId = process.env.GOOGLE_CLIENT_ID;
+        const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+        const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+        // التحقق من وجود جميع المتغيرات المطلوبة لضمان عدم حدوث أخطاء
+        if (!clientId || !clientSecret || !refreshToken) {
+            throw new Error('متغيرات Google Drive (CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN) غير موجودة أو غير كاملة في ملف .env');
         }
-        const credentialsContent = fs.readFileSync(credentialsPath, 'utf8');
-        const { client_secret, client_id, redirect_uris } = JSON.parse(credentialsContent).installed;
 
-        // 2. إنشاء عميل OAuth2
-        const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+        // 2. إنشاء عميل OAuth2 باستخدام بيانات الاعتماد
+        const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret);
 
-        // 3. قراءة التوكن الدائم الذي حصلنا عليه
-        const tokenPath = path.resolve(process.cwd(), 'token.json');
-        if (!fs.existsSync(tokenPath)) {
-            throw new Error("لم يتم العثور على ملف token.json. يرجى تشغيل 'node generate-token.js' أولاً للحصول عليه.");
-        }
-        const tokenContent = fs.readFileSync(tokenPath, 'utf8');
-        oAuth2Client.setCredentials(JSON.parse(tokenContent));
+        // 3. تعيين التوكن الدائم للعميل، مما يسمح له بتجديد صلاحية الوصول تلقائيًا
+        oAuth2Client.setCredentials({
+            refresh_token: refreshToken
+        });
 
-        // 4. إنشاء خدمة Drive باستخدام المصادقة الصحيحة
+        // 4. إنشاء خدمة Drive وتخزينها في المتغير العام
         drive = google.drive({ version: 'v3', auth: oAuth2Client });
-        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (باسم المستخدم).');
+        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (باستخدام متغيرات البيئة).');
         return drive;
 
     } catch (error) {
-        console.error('[Google Drive] ❌ فشل تهيئة Google Drive API:', error.message);
-        throw error; // إيقاف العملية إذا فشلت التهيئة
+        console.error('[Google Drive] ❌ فشل فادح في تهيئة Google Drive API:', error.message);
+        // رمي الخطأ لإيقاف العملية إذا لم تنجح المصادقة
+        throw error;
     }
 }
 
 /**
- * رفع فيديو إلى Google Drive.
- * هذه الدالة تبقى كما هي تقريبًا، لكنها ستستخدم الآن initializeDrive() المحدثة.
+ * رفع ملف فيديو إلى Google Drive.
+ * @param {string} filePath - المسار الكامل للملف المحلي المراد رفعه.
+ * @param {string} username - اسم مستخدم تيك توك، يستخدم في تسمية الملف.
+ * @returns {Promise<Object>} كائن يحتوي على معلومات الملف المرفوع.
  */
-async function uploadVideoToDrive(filePath, filename) {
+async function uploadVideoToDrive(filePath, username) {
     try {
-        const driveClient = await initializeDrive(); // استدعاء دالة التهيئة الجديدة
+        const driveClient = await initializeDrive(); // التأكد من أن المصادقة جاهزة
         const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
         if (!folderId) {
-            throw new Error('GOOGLE_DRIVE_FOLDER_ID غير محدد في ملف .env');
+            throw new Error('متغير GOOGLE_DRIVE_FOLDER_ID غير محدد في ملف .env');
         }
 
         console.log(`[Google Drive] 📤 بدء رفع الملف: ${filePath}`);
@@ -65,34 +65,38 @@ async function uploadVideoToDrive(filePath, filename) {
         const fileSizeInMB = (fileStats.size / 1024 / 1024).toFixed(2);
         console.log(`[Google Drive] 📊 حجم الملف: ${fileSizeInMB} MB`);
 
+        // إعداد بيانات الملف (الاسم، والمجلد الأب)
         const fileMetadata = {
-            name: `${filename}_${Date.now()}.mp4`,
+            name: `${username}_${new Date().toISOString()}.mp4`,
             parents: [folderId],
         };
 
+        // إعداد محتوى الملف للرفع
         const media = {
             mimeType: 'video/mp4',
             body: fs.createReadStream(filePath),
         };
 
+        // تنفيذ عملية الرفع
         const response = await driveClient.files.create({
             requestBody: fileMetadata,
             media: media,
-            fields: 'id, name, size, webViewLink',
-            supportsAllDrives: true, // مهم جدًا لدعم Shared Drives
+            fields: 'id, name, size, webViewLink', // طلب الحقول المطلوبة فقط
+            supportsAllDrives: true, // ضروري لدعم الرفع إلى Shared Drives
         });
         
         const uploadedFile = response.data;
         console.log(`[Google Drive] ✅ تم الرفع بنجاح! معرف الملف: ${uploadedFile.id}`);
 
-        // جعل الملف عامًا (اختياري ولكنه مفيد)
+        // جعل الملف قابلاً للمشاهدة من قبل أي شخص لديه الرابط
         await makeFilePublic(uploadedFile.id);
 
+        // إرجاع كائن منظم يحتوي على بيانات مفيدة للبوت
         return {
             id: uploadedFile.id,
             name: uploadedFile.name,
             size: uploadedFile.size,
-            directLink: uploadedFile.webViewLink, // الرابط المباشر للمشاهدة
+            directLink: uploadedFile.webViewLink,
         };
 
     } catch (error) {
@@ -102,7 +106,8 @@ async function uploadVideoToDrive(filePath, filename) {
 }
 
 /**
- * جعل الملف عامًا (يمكن لأي شخص لديه الرابط الوصول إليه).
+ * جعل الملف عامًا (يمكن لأي شخص لديه الرابط الوصول إليه كـ "قارئ").
+ * @param {string} fileId - معرف الملف على Google Drive.
  */
 async function makeFilePublic(fileId) {
     try {
@@ -117,11 +122,12 @@ async function makeFilePublic(fileId) {
         });
         console.log(`[Google Drive] 🔓 تم جعل الملف عامًا للمشاهدة.`);
     } catch (error) {
-        console.error('[Google Drive] ⚠️ فشل جعل الملف عامًا:', error.message);
+        // لا نرمي خطأ هنا، لأن الرفع قد نجح بالفعل، وهذا فشل ثانوي
+        console.error('[Google Drive] ⚠️ فشل جعل الملف عامًا (لكن تم رفعه بنجاح):', error.message);
     }
 }
 
-// تصدير الدوال للاستخدام في bot.js
+// تصدير الدوال التي سيتم استخدامها في الملفات الأخرى (مثل bot.js)
 export {
     uploadVideoToDrive
 };
