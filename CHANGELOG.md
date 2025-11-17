@@ -1,5 +1,48 @@
 # سجل التغييرات - TikTok Recorder Bot
 
+## [إصلاح إضافي - 17 نوفمبر 2025]
+
+### 🔧 إصلاح مشكلة `undefined` في النتائج
+
+**المشكلة المكتشفة:**
+- بعد نجاح الرفع، كانت النتيجة تظهر:
+  ```
+  [Cloudinary] ✅ تم الرفع بنجاح. الرابط: undefined
+  [Cloudinary] 🆔 معرف الملف: undefined
+  ```
+
+**السبب:**
+- دالة `upload_large()` تستخدم **callback pattern** وليس **Promise**
+- كان الكود يستدعيها كـ async/await مباشرة
+
+**الحل:**
+- تغليف `upload_large()` في **Promise wrapper**
+- معالجة callback بشكل صحيح
+
+**الكود بعد الإصلاح:**
+```javascript
+const result = await new Promise((resolve, reject) => {
+    cloudinary.uploader.upload_large(
+        filePath,
+        { options... },
+        (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+        }
+    );
+});
+```
+
+**النتيجة الآن:**
+```
+[Cloudinary] ✅ تم الرفع بنجاح. الرابط: https://res.cloudinary.com/...
+[Cloudinary] 🆔 معرف الملف: tiktok_records/user_123456789
+[Cloudinary] 📊 الحجم: 13.15 MB
+[Cloudinary] ⏱️ المدة: 45.23s
+```
+
+---
+
 ## [إصلاح - 15 نوفمبر 2025]
 
 ### 🔧 الإصلاحات المطبقة:
