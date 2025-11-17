@@ -8,7 +8,27 @@ if (process.env.TIKTOK_COOKIE) {
     console.log('[TikTok Service] تم العثور على كوكي، سيتم استخدامه.');
     headers['Cookie'] = process.env.TIKTOK_COOKIE;
 }
-const apiClient = axios.create({ headers });
+const apiClient = axios.create({ 
+    headers,
+    timeout: 15000, // 15 seconds timeout
+});
+
+// دالة مساعدة لإعادة المحاولة
+async function retryRequest(fn, retries = 2, delay = 2000) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (i === retries - 1) throw error;
+            if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                console.log(`[TikTok Service] ⏱️ timeout, إعادة المحاولة ${i + 1}/${retries}...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                throw error;
+            }
+        }
+    }
+}
 
 async function getRoomId(username) {
     try {
@@ -37,11 +57,13 @@ async function getRoomId(username) {
 async function isUserLive(roomId) {
     try {
         const liveCheckUrl = `https://webcast.tiktok.com/webcast/room/check_alive/?aid=1988&room_ids=${roomId}`;
-        const response = await apiClient.get(liveCheckUrl);
+        const response = await retryRequest(() => apiClient.get(liveCheckUrl));
         const isLive = response.data?.data?.[0]?.alive ?? false;
         return isLive;
     } catch (error) {
-        console.error(`[TikTok Service] خطأ في isUserLive للغرفة ${roomId}:`, error.message);
+        if (error.code !== 'ETIMEDOUT') {
+            console.error(`[TikTok Service] خطأ في isUserLive للغرفة ${roomId}:`, error.message);
+        }
         return false;
     }
 }

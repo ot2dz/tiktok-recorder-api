@@ -10,7 +10,7 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
-import { uploadVideo } from './services/cloudinary.service.js';
+import { uploadVideoToDrive } from './services/drive.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 
@@ -177,36 +177,28 @@ async function handleRecordLive(ctx, username) {
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
                 let uploadSuccessful = false;
-                let cloudinaryResult = null;
+                let driveResult = null;
 
                 try {
                     // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
                     await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري أرشفة الفيديو ومعالجته...`);
                     
-                    // الخطوة 2: الأرشفة أولاً - الرفع إلى Cloudinary
-                    console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudinary: ${finalMp4Path}`);
-                    cloudinaryResult = await uploadVideo(finalMp4Path, username);
+                    // الخطوة 2: الرفع إلى Google Drive
+                    console.log(`[Upload] 📤 بدء رفع الملف إلى Google Drive: ${finalMp4Path}`);
+                    const driveResult = await uploadVideoToDrive(finalMp4Path, username);
                     
                     // ✅ تأكيد نجاح الرفع
                     uploadSuccessful = true;
-                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى Cloudinary`);
-                    await ctx.reply(`☁️ تمت أرشفة الفيديو بنجاح على Cloudinary.\n🔗 الرابط: ${cloudinaryResult.secure_url}`);
-
-                    // الخطوة 3: التحقق من الحجم
-                    const fileStats = fs.statSync(finalMp4Path);
-                    const fileSizeInMB = fileStats.size / (1024 * 1024);
-                    const telegramLimitMB = 50;
-
-                    // الخطوة 4: الإرسال المشروط إلى تليجرام
-                    if (fileSizeInMB <= telegramLimitMB) {
-                        await ctx.reply('حجم الملف مناسب، جاري إرساله مباشرة...');
-                        await ctx.replyWithVideo({ source: finalMp4Path });
-                    } else {
-                        await ctx.reply(
-                            `🎥 حجم الفيديو (${fileSizeInMB.toFixed(2)} MB) يتجاوز حد تليجرام (${telegramLimitMB} MB).\n\n` +
-                            `يمكنك مشاهدته أو تحميله مباشرة من الرابط أعلاه ⬆️`
-                        );
-                    }
+                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى Google Drive`);
+                    
+                    // إرسال رابط Google Drive فقط
+                    await ctx.reply(
+                        `✅ تم رفع الفيديو بنجاح!\n\n` +
+                        `📁 اسم الملف: ${driveResult.name}\n` +
+                        `📊 الحجم: ${(driveResult.size / 1024 / 1024).toFixed(2)} MB\n\n` +
+                        `🔗 رابط المشاهدة والتحميل:\n${driveResult.directLink}\n\n` +
+                        `💡 يمكنك مشاهدة الفيديو مباشرة أو تحميله من Google Drive`
+                    );
 
                 } catch (processingError) {
                     console.error("❌ خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
@@ -214,17 +206,17 @@ async function handleRecordLive(ctx, username) {
                     if (!uploadSuccessful) {
                         // فشل الرفع - لا تحذف الملف!
                         await ctx.reply(
-                            `⚠️ حدث خطأ أثناء رفع الفيديو إلى Cloudinary.\n` +
+                            `⚠️ حدث خطأ أثناء رفع الفيديو إلى Google Drive.\n` +
                             `📁 تم الاحتفاظ بالملف محلياً: ${finalMp4Path}\n` +
                             `🔄 سيتم إعادة المحاولة لاحقاً.`
                         );
                         console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف لعدم نجاح الرفع: ${finalMp4Path}`);
                         return; // الخروج بدون حذف الملف
                     } else {
-                        // نجح الرفع لكن فشل الإرسال إلى تليجرام
+                        // نجح الرفع
                         await ctx.reply(
-                            `⚠️ تم رفع الفيديو بنجاح لكن حدث خطأ أثناء إرساله.\n` +
-                            `🔗 يمكنك الوصول إليه من: ${cloudinaryResult?.secure_url}`
+                            `✅ تم رفع الفيديو بنجاح على Google Drive!\n` +
+                            `🔗 الرابط: ${driveResult?.directLink}`
                         );
                     }
                 } finally {
