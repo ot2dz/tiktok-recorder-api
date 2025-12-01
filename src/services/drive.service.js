@@ -101,6 +101,13 @@ async function uploadVideoToDrive(filePath, username) {
 
     } catch (error) {
         console.error('[Google Drive] ❌ حدث خطأ فادح أثناء الرفع:', error.message);
+        
+        // إضافة معلومات إضافية للخطأ لمعرفة نوعه
+        if (error.message && error.message.includes('invalid_grant')) {
+            error.isTokenExpired = true;
+            error.userMessage = '🔐 انتهت صلاحية Google Drive Token. يرجى تجديده.';
+        }
+        
         throw error;
     }
 }

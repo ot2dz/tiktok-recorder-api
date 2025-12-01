@@ -1,18 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
-import { fileURLToPath } from 'url'; // <-- استيراد الدالة المطلوبة
 import { convertFlvToMp4 } from '../utils/video.util.js';
-
-// --- الحل: إنشاء __dirname بالطريقة الحديثة ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// ---------------------------------------------
+import { getDownloadsPath } from '../utils/path.util.js';
 
 async function recordLiveStream(streamUrl, username, signal) {
     const timestamp = new Date().toISOString().replace(/:/g, '-').slice(0, 19);
-    // الآن outputDir سيعمل بشكل صحيح
-    const outputDir = path.join(__dirname, '..', '..', 'downloads'); 
+    const outputDir = getDownloadsPath();
     const tempFilePath = path.join(outputDir, `${username}_${timestamp}.flv`);
 
     if (!fs.existsSync(outputDir)) {

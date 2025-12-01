@@ -13,6 +13,8 @@ import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideoToDrive } from './services/drive.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
+import { generateOAuthUrl, exchangeCodeForToken, saveRefreshTokenToEnv, pendingOAuthStates } from './services/oauth-telegram.service.js';
+import { addToFailedQueue, getFailedQueue, retryAllFailedUploads, getQueueSize } from './services/upload-queue.service.js';
 
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -35,7 +37,11 @@ const mainKeyboard = Markup.keyboard([
 
 bot.start((ctx) => {
     ctx.reply(
-        'أهلاً بك! اختر أحد الخيارات من القائمة للبدء.',
+        'أهلاً بك! اختر أحد الخيارات من القائمة للبدء.\n\n' +
+        '📌 أوامر إضافية:\n' +
+        '/refresh_token - تجديد Google Drive Token\n' +
+        '/reupload - إعادة رفع الملفات الفاشلة\n' +
+        '/queue - عرض قائمة الملفات المنتظرة',
         mainKeyboard
     );
 });
@@ -57,6 +63,88 @@ bot.hears(MANAGE_MONITOR_BTN, (ctx) => {
         [Markup.button.callback('📋 عرض القائمة', 'list_monitor')]
     ]);
     ctx.reply('اختر الإجراء المطلوب:', monitorKeyboard);
+});
+
+// ===== أوامر جديدة لإدارة Google Drive Token =====
+
+// أمر تجديد Token
+bot.command('refresh_token', async (ctx) => {
+    try {
+        const authUrl = generateOAuthUrl(ctx.chat.id);
+        
+        await ctx.reply(
+            '🔐 *تجديد Google Drive Token*\n\n' +
+            '📌 اتبع الخطوات التالية:\n\n' +
+            '1️⃣ افتح الرابط أدناه في المتصفح\n' +
+            '2️⃣ سجل الدخول بحساب Google\n' +
+            '3️⃣ اسمح بالصلاحيات\n' +
+            '4️⃣ انسخ الكود الذي سيظهر لك\n' +
+            '5️⃣ أرسل الكود هنا في المحادثة\n\n' +
+            `🔗 [اضغط هنا للتفويض](${authUrl})\n\n` +
+            '⏰ لديك 15 دقيقة لإكمال العملية.',
+            { parse_mode: 'Markdown', disable_web_page_preview: true }
+        );
+        
+        userState[ctx.chat.id] = 'waiting_for_oauth_code';
+    } catch (error) {
+        console.error('[Bot] خطأ في أمر refresh_token:', error);
+        await ctx.reply('❌ حدث خطأ أثناء توليد رابط التفويض.');
+    }
+});
+
+// أمر إعادة رفع الملفات الفاشلة
+bot.command('reupload', async (ctx) => {
+    try {
+        const queueSize = getQueueSize();
+        
+        if (queueSize === 0) {
+            await ctx.reply('✅ لا توجد ملفات في قائمة الانتظار.');
+            return;
+        }
+        
+        await ctx.reply(`🔄 جاري إعادة رفع ${queueSize} ملف...`);
+        
+        const results = await retryAllFailedUploads(bot);
+        
+        await ctx.reply(
+            `📊 *نتائج إعادة الرفع:*\n\n` +
+            `✅ نجح: ${results.success}\n` +
+            `❌ فشل: ${results.failed}\n\n` +
+            `المتبقي في القائمة: ${getQueueSize()}`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (error) {
+        console.error('[Bot] خطأ في أمر reupload:', error);
+        await ctx.reply('❌ حدث خطأ أثناء إعادة رفع الملفات.');
+    }
+});
+
+// أمر عرض قائمة الانتظار
+bot.command('queue', async (ctx) => {
+    try {
+        const queue = getFailedQueue();
+        
+        if (queue.length === 0) {
+            await ctx.reply('✅ قائمة الانتظار فارغة.');
+            return;
+        }
+        
+        let message = `📋 *قائمة الملفات المنتظرة:* (${queue.length})\n\n`;
+        
+        queue.forEach((item, index) => {
+            const fileName = item.filePath.split('/').pop();
+            const age = Math.floor((Date.now() - item.timestamp) / 1000 / 60); // بالدقائق
+            message += `${index + 1}. \`${fileName}\`\n`;
+            message += `   👤 ${item.username} | ⏱️ منذ ${age} دقيقة | 🔄 ${item.attempts} محاولة\n\n`;
+        });
+        
+        message += '\n💡 استخدم /reupload لإعادة رفع الملفات';
+        
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+    } catch (error) {
+        console.error('[Bot] خطأ في أمر queue:', error);
+        await ctx.reply('❌ حدث خطأ أثناء عرض القائمة.');
+    }
 });
 
 bot.action('add_monitor', (ctx) => {
@@ -96,6 +184,44 @@ bot.on(message('text'), async (ctx) => {
         ctx.reply('الرجاء اختيار أحد الخيارات من القائمة أولاً.', mainKeyboard);
         return;
     }
+    
+    // معالجة كود OAuth
+    if (currentState === 'waiting_for_oauth_code') {
+        delete userState[chatId];
+        
+        try {
+            await ctx.reply('⏳ جاري معالجة الكود...');
+            
+            const refreshToken = await exchangeCodeForToken(chatId, username);
+            await saveRefreshTokenToEnv(refreshToken);
+            
+            await ctx.reply(
+                '✅ *تم تجديد Token بنجاح!*\n\n' +
+                '🔄 جاري إعادة محاولة رفع الملفات الفاشلة...',
+                { parse_mode: 'Markdown' }
+            );
+            
+            // إعادة محاولة رفع الملفات الفاشلة تلقائياً
+            const queueSize = getQueueSize();
+            if (queueSize > 0) {
+                const results = await retryAllFailedUploads(bot);
+                await ctx.reply(
+                    `📊 نتائج إعادة الرفع:\n` +
+                    `✅ نجح: ${results.success}\n` +
+                    `❌ فشل: ${results.failed}`
+                );
+            } else {
+                await ctx.reply('ℹ️ لا توجد ملفات منتظرة للرفع.');
+            }
+            
+        } catch (error) {
+            console.error('[Bot] خطأ في معالجة OAuth code:', error);
+            await ctx.reply(`❌ فشل تجديد Token:\n${error.message}`);
+        }
+        
+        return;
+    }
+    
     delete userState[chatId];
 
     switch (currentState) {
@@ -204,13 +330,41 @@ async function handleRecordLive(ctx, username) {
                     console.error("❌ خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
                     
                     if (!uploadSuccessful) {
-                        // فشل الرفع - لا تحذف الملف!
-                        await ctx.reply(
-                            `⚠️ حدث خطأ أثناء رفع الفيديو إلى Google Drive.\n` +
-                            `📁 تم الاحتفاظ بالملف محلياً: ${finalMp4Path}\n` +
-                            `🔄 سيتم إعادة المحاولة لاحقاً.`
-                        );
-                        console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف لعدم نجاح الرفع: ${finalMp4Path}`);
+                        // التحقق من نوع الخطأ
+                        const isTokenError = processingError.isTokenExpired || 
+                                           (processingError.message && processingError.message.includes('invalid_grant'));
+                        
+                        // إضافة الملف إلى قائمة الانتظار
+                        addToFailedQueue(finalMp4Path, username, ctx.chat.id);
+                        
+                        if (isTokenError) {
+                            // خطأ Token - إرسال رابط تجديد
+                            const oauthUrl = generateOAuthUrl(ctx.chat.id);
+                            
+                            await ctx.reply(
+                                `🔐 *انتهت صلاحية Google Drive Token*\n\n` +
+                                `📁 تم الاحتفاظ بالملف وإضافته لقائمة الانتظار\n` +
+                                `📊 الملفات المنتظرة: ${getQueueSize()}\n\n` +
+                                `⚡ *لتجديد Token والرفع التلقائي:*\n` +
+                                `1️⃣ [اضغط هنا للتفويض](${oauthUrl})\n` +
+                                `2️⃣ سجل الدخول بحساب Google\n` +
+                                `3️⃣ انسخ الكود وأرسله هنا\n\n` +
+                                `💡 أو استخدم: /refresh_token`,
+                                { parse_mode: 'Markdown', disable_web_page_preview: true }
+                            );
+                            
+                            userState[ctx.chat.id] = 'waiting_for_oauth_code';
+                        } else {
+                            // خطأ آخر
+                            await ctx.reply(
+                                `⚠️ حدث خطأ أثناء رفع الفيديو.\n` +
+                                `📁 تم إضافة الملف لقائمة الانتظار (${getQueueSize()} ملف)\n` +
+                                `السبب: ${processingError.message}\n\n` +
+                                `� استخدم /reupload لإعادة المحاولة`
+                            );
+                        }
+                        
+                        console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف وإضافته للقائمة: ${finalMp4Path}`);
                         return; // الخروج بدون حذف الملف
                     } else {
                         // نجح الرفع

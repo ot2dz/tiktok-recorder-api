@@ -11,7 +11,6 @@ let handleRecordLive; // متغير لتخزين الدالة
  * @param {Telegraf} bot - نسخة البوت لإرسال الإشعارات والتسجيل
  */
 async function checkMonitoredUsers(bot) {
-    console.log('[Monitor] بدء جولة فحص جديدة...');
     const users = await dbService.getMonitoredUsers();
 
     for (const user of users) {
