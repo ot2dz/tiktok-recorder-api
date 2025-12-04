@@ -1,7 +1,7 @@
 import { google } from 'googleapis';
 import fs from 'fs';
 import 'dotenv/config';
-import { getEnvPath } from '../utils/path.util.js';
+import { saveGoogleRefreshToken, getTokenStatus } from './db.service.js';
 
 /**
  * خدمة لإدارة OAuth عبر التليجرام
@@ -77,37 +77,16 @@ async function exchangeCodeForToken(chatId, code) {
 }
 
 /**
- * حفظ Refresh Token الجديد في ملف .env
+ * حفظ Refresh Token الجديد في قاعدة البيانات
  * @param {string} refreshToken - الـ Refresh Token الجديد
  * @returns {Promise<void>}
  */
-async function saveRefreshTokenToEnv(refreshToken) {
+async function saveRefreshToken(refreshToken) {
     try {
-        const envPath = getEnvPath();
-        let envContent = fs.readFileSync(envPath, 'utf8');
-        
-        // استبدال أو إضافة GOOGLE_REFRESH_TOKEN
-        const tokenLine = `GOOGLE_REFRESH_TOKEN=${refreshToken}`;
-        
-        if (envContent.includes('GOOGLE_REFRESH_TOKEN=')) {
-            // استبدال القيمة القديمة
-            envContent = envContent.replace(
-                /GOOGLE_REFRESH_TOKEN=.*/,
-                tokenLine
-            );
-        } else {
-            // إضافة القيمة الجديدة
-            envContent += `\n${tokenLine}\n`;
-        }
-        
-        fs.writeFileSync(envPath, envContent, 'utf8');
-        
-        // تحديث المتغير في البيئة الحالية
-        process.env.GOOGLE_REFRESH_TOKEN = refreshToken;
-        
-        console.log('[OAuth Telegram] ✅ تم حفظ Refresh Token الجديد في .env');
+        await saveGoogleRefreshToken(refreshToken);
+        console.log('[OAuth Telegram] ✅ تم حفظ Refresh Token الجديد في قاعدة البيانات');
     } catch (error) {
-        console.error('[OAuth Telegram] ❌ فشل حفظ Token في .env:', error.message);
+        console.error('[OAuth Telegram] ❌ فشل حفظ Token:', error.message);
         throw error;
     }
 }
@@ -120,13 +99,14 @@ async function validateRefreshToken() {
     try {
         const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
         const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-        const REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
+        const tokenStatus = await getTokenStatus();
 
-        if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
+        if (!CLIENT_ID || !CLIENT_SECRET || !tokenStatus.hasToken) {
             return false;
         }
 
         const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET);
+        const REFRESH_TOKEN = await require('./db.service.js').getGoogleRefreshToken();
         oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
 
         // محاولة الحصول على Access Token
@@ -160,7 +140,7 @@ setInterval(cleanupExpiredStates, 30 * 60 * 1000);
 export {
     generateOAuthUrl,
     exchangeCodeForToken,
-    saveRefreshTokenToEnv,
+    saveRefreshToken,
     validateRefreshToken,
     pendingOAuthStates
 };

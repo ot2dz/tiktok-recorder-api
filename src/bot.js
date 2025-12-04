@@ -11,10 +11,9 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideoToDrive } from './services/drive.service.js';
-import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers } from './services/db.service.js';
+import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
-import { generateOAuthUrl, exchangeCodeForToken, saveRefreshTokenToEnv, pendingOAuthStates } from './services/oauth-telegram.service.js';
-import { addToFailedQueue, getFailedQueue, retryAllFailedUploads, getQueueSize } from './services/upload-queue.service.js';
+import { generateOAuthUrl, exchangeCodeForToken, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
 
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -39,9 +38,9 @@ bot.start((ctx) => {
     ctx.reply(
         'أهلاً بك! اختر أحد الخيارات من القائمة للبدء.\n\n' +
         '📌 أوامر إضافية:\n' +
-        '/refresh_token - تجديد Google Drive Token\n' +
-        '/reupload - إعادة رفع الملفات الفاشلة\n' +
-        '/queue - عرض قائمة الملفات المنتظرة',
+        '/failed_videos - عرض الفيديوهات الفاشلة\n' +
+        '/update_token - تحديث Google Drive Token\n' +
+        '/token_status - حالة Token',
         mainKeyboard
     );
 });
@@ -67,13 +66,13 @@ bot.hears(MANAGE_MONITOR_BTN, (ctx) => {
 
 // ===== أوامر جديدة لإدارة Google Drive Token =====
 
-// أمر تجديد Token
-bot.command('refresh_token', async (ctx) => {
+// أمر تحديث Token
+bot.command('update_token', async (ctx) => {
     try {
         const authUrl = generateOAuthUrl(ctx.chat.id);
         
         await ctx.reply(
-            '🔐 *تجديد Google Drive Token*\n\n' +
+            '🔐 *تحديث Google Drive Token*\n\n' +
             '📌 اتبع الخطوات التالية:\n\n' +
             '1️⃣ افتح الرابط أدناه في المتصفح\n' +
             '2️⃣ سجل الدخول بحساب Google\n' +
@@ -87,63 +86,102 @@ bot.command('refresh_token', async (ctx) => {
         
         userState[ctx.chat.id] = 'waiting_for_oauth_code';
     } catch (error) {
-        console.error('[Bot] خطأ في أمر refresh_token:', error);
+        console.error('[Bot] خطأ في أمر update_token:', error);
         await ctx.reply('❌ حدث خطأ أثناء توليد رابط التفويض.');
     }
 });
 
-// أمر إعادة رفع الملفات الفاشلة
-bot.command('reupload', async (ctx) => {
+// أمر عرض الفيديوهات الفاشلة
+bot.command('failed_videos', async (ctx) => {
     try {
-        const queueSize = getQueueSize();
+        const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
         
-        if (queueSize === 0) {
-            await ctx.reply('✅ لا توجد ملفات في قائمة الانتظار.');
+        if (failedVideos.length === 0) {
+            await ctx.reply('✅ لا توجد فيديوهات فاشلة في قائمة الانتظار.');
             return;
         }
         
-        await ctx.reply(`🔄 جاري إعادة رفع ${queueSize} ملف...`);
+        let message = `� *قائمة الفيديوهات الفاشلة* (${failedVideos.length})\n\n`;
         
-        const results = await retryAllFailedUploads(bot);
+        const buttons = [];
         
-        await ctx.reply(
-            `📊 *نتائج إعادة الرفع:*\n\n` +
-            `✅ نجح: ${results.success}\n` +
-            `❌ فشل: ${results.failed}\n\n` +
-            `المتبقي في القائمة: ${getQueueSize()}`,
-            { parse_mode: 'Markdown' }
-        );
+        failedVideos.forEach((video, index) => {
+            const fileName = video.filepath.split('/').pop();
+            const failedDate = new Date(video.failedAt).toLocaleString('ar-EG');
+            
+            message += `${index + 1}️⃣ \`${fileName}\`\n`;
+            message += `   � حجم: ${video.fileSize}\n`;
+            message += `   ⏰ تاريخ: ${failedDate}\n`;
+            message += `   ❌ سبب: ${video.error}\n`;
+            message += `   🔄 محاولات: ${video.attempts}\n\n`;
+            
+            // إضافة أزرار لكل فيديو
+            buttons.push([
+                Markup.button.callback(`🔄 إعادة رفع #${index + 1}`, `retry_${video.id}`),
+                Markup.button.callback(`🗑️ حذف #${index + 1}`, `delete_${video.id}`)
+            ]);
+        });
+        
+        // أزرار إضافية
+        buttons.push([
+            Markup.button.callback('🔄 إعادة رفع الكل', 'retry_all'),
+            Markup.button.callback('🗑️ حذف الكل', 'delete_all')
+        ]);
+        
+        await ctx.reply(message, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard(buttons)
+        });
     } catch (error) {
-        console.error('[Bot] خطأ في أمر reupload:', error);
-        await ctx.reply('❌ حدث خطأ أثناء إعادة رفع الملفات.');
+        console.error('[Bot] خطأ في أمر failed_videos:', error);
+        await ctx.reply('❌ حدث خطأ أثناء عرض القائمة.');
     }
 });
 
-// أمر عرض قائمة الانتظار
-bot.command('queue', async (ctx) => {
+// أمر عرض حالة Token
+bot.command('token_status', async (ctx) => {
     try {
-        const queue = getFailedQueue();
+        const status = await getTokenStatus();
         
-        if (queue.length === 0) {
-            await ctx.reply('✅ قائمة الانتظار فارغة.');
-            return;
+        const statusEmoji = status.hasToken ? '✅' : '❌';
+        const statusText = status.hasToken ? 'نشط' : 'غير موجود';
+        
+        const lastUpdated = status.lastUpdated 
+            ? new Date(status.lastUpdated).toLocaleString('ar-EG')
+            : 'غير معروف';
+            
+        const lastUsed = status.lastUsed
+            ? new Date(status.lastUsed).toLocaleString('ar-EG')
+            : 'لم يُستخدم بعد';
+        
+        const failedCount = await getFailedUploadsByChatId(ctx.chat.id);
+        
+        const message = 
+            `📊 *حالة Google Drive Token*\n\n` +
+            `الحالة: ${statusEmoji} ${statusText}\n` +
+            `آخر تحديث: ${lastUpdated}\n` +
+            `آخر استخدام: ${lastUsed}\n\n` +
+            `📈 *الإحصائيات:*\n` +
+            `✅ رفع ناجح: ${status.stats.successfulUploads}\n` +
+            `❌ رفع فاشل: ${status.stats.failedUploads}\n` +
+            `� إجمالي: ${status.stats.totalUploads}\n\n` +
+            `🎬 فيديوهات فاشلة حالياً: ${failedCount.length}`;
+        
+        const buttons = [];
+        if (!status.hasToken) {
+            buttons.push([Markup.button.callback('� تحديث Token', 'update_token_now')]);
+        }
+        if (failedCount.length > 0) {
+            buttons.push([Markup.button.callback('📋 عرض الفيديوهات الفاشلة', 'show_failed')]);
         }
         
-        let message = `📋 *قائمة الملفات المنتظرة:* (${queue.length})\n\n`;
-        
-        queue.forEach((item, index) => {
-            const fileName = item.filePath.split('/').pop();
-            const age = Math.floor((Date.now() - item.timestamp) / 1000 / 60); // بالدقائق
-            message += `${index + 1}. \`${fileName}\`\n`;
-            message += `   👤 ${item.username} | ⏱️ منذ ${age} دقيقة | 🔄 ${item.attempts} محاولة\n\n`;
+        await ctx.reply(message, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard(buttons)
         });
-        
-        message += '\n💡 استخدم /reupload لإعادة رفع الملفات';
-        
-        await ctx.reply(message, { parse_mode: 'Markdown' });
     } catch (error) {
-        console.error('[Bot] خطأ في أمر queue:', error);
-        await ctx.reply('❌ حدث خطأ أثناء عرض القائمة.');
+        console.error('[Bot] خطأ في أمر token_status:', error);
+        await ctx.reply('❌ حدث خطأ أثناء جلب حالة Token.');
     }
 });
 
@@ -175,6 +213,78 @@ bot.action('list_monitor', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
+// ===== معالجات الأزرار للفيديوهات الفاشلة =====
+
+// زر إعادة رفع فيديو واحد
+bot.action(/^retry_(.+)$/, async (ctx) => {
+    const videoId = ctx.match[1];
+    
+    if (videoId === 'all') {
+        // إعادة رفع الكل
+        const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
+        if (failedVideos.length === 0) {
+            await ctx.answerCbQuery('لا توجد فيديوهات للرفع');
+            return;
+        }
+        
+        await ctx.answerCbQuery(`جاري إعادة رفع ${failedVideos.length} فيديو...`);
+        await retryUploadVideos(failedVideos, ctx);
+    } else {
+        // إعادة رفع فيديو واحد
+        const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
+        const video = failedVideos.find(v => v.id === videoId);
+        
+        if (!video) {
+            await ctx.answerCbQuery('الفيديو غير موجود');
+            return;
+        }
+        
+        await ctx.answerCbQuery('جاري إعادة الرفع...');
+        await retryUploadVideos([video], ctx);
+    }
+});
+
+// زر حذف فيديو
+bot.action(/^delete_(.+)$/, async (ctx) => {
+    const videoId = ctx.match[1];
+    
+    if (videoId === 'all') {
+        // حذف الكل
+        const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
+        for (const video of failedVideos) {
+            await removeFailedUpload(video.id);
+        }
+        await ctx.answerCbQuery(`تم حذف ${failedVideos.length} فيديو`);
+        await ctx.editMessageText('✅ تم حذف جميع الفيديوهات الفاشلة');
+    } else {
+        // حذف فيديو واحد
+        await removeFailedUpload(videoId);
+        await ctx.answerCbQuery('تم الحذف');
+        
+        // تحديث القائمة
+        const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
+        if (failedVideos.length === 0) {
+            await ctx.editMessageText('✅ لا توجد فيديوهات فاشلة');
+        }
+    }
+});
+
+// زر تحديث Token
+bot.action('update_token_now', async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.deleteMessage();
+    // إعادة توجيه لأمر update_token
+    bot.command('update_token')(ctx);
+});
+
+// زر عرض الفيديوهات الفاشلة
+bot.action('show_failed', async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.deleteMessage();
+    // إعادة توجيه لأمر failed_videos
+    bot.command('failed_videos')(ctx);
+});
+
 bot.on(message('text'), async (ctx) => {
     const chatId = ctx.chat.id;
     const currentState = userState[chatId];
@@ -193,30 +303,23 @@ bot.on(message('text'), async (ctx) => {
             await ctx.reply('⏳ جاري معالجة الكود...');
             
             const refreshToken = await exchangeCodeForToken(chatId, username);
-            await saveRefreshTokenToEnv(refreshToken);
+            await saveRefreshToken(refreshToken);
             
             await ctx.reply(
-                '✅ *تم تجديد Token بنجاح!*\n\n' +
-                '🔄 جاري إعادة محاولة رفع الملفات الفاشلة...',
-                { parse_mode: 'Markdown' }
+                '✅ *تم تحديث Token بنجاح!*\n\n' +
+                '🔄 هل تريد إعادة رفع الفيديوهات الفاشلة؟',
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('✅ نعم، أعد الرفع', 'retry_all')],
+                        [Markup.button.callback('❌ لا، لاحقاً', 'cancel_retry')]
+                    ])
+                }
             );
-            
-            // إعادة محاولة رفع الملفات الفاشلة تلقائياً
-            const queueSize = getQueueSize();
-            if (queueSize > 0) {
-                const results = await retryAllFailedUploads(bot);
-                await ctx.reply(
-                    `📊 نتائج إعادة الرفع:\n` +
-                    `✅ نجح: ${results.success}\n` +
-                    `❌ فشل: ${results.failed}`
-                );
-            } else {
-                await ctx.reply('ℹ️ لا توجد ملفات منتظرة للرفع.');
-            }
             
         } catch (error) {
             console.error('[Bot] خطأ في معالجة OAuth code:', error);
-            await ctx.reply(`❌ فشل تجديد Token:\n${error.message}`);
+            await ctx.reply(`❌ فشل تحديث Token:\n${error.message}`);
         }
         
         return;
@@ -317,6 +420,9 @@ async function handleRecordLive(ctx, username) {
                     uploadSuccessful = true;
                     console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى Google Drive`);
                     
+                    // تحديث الإحصائيات
+                    await updateUploadStats(true);
+                    
                     // إرسال رابط Google Drive فقط
                     await ctx.reply(
                         `✅ تم رفع الفيديو بنجاح!\n\n` +
@@ -334,8 +440,19 @@ async function handleRecordLive(ctx, username) {
                         const isTokenError = processingError.isTokenExpired || 
                                            (processingError.message && processingError.message.includes('invalid_grant'));
                         
-                        // إضافة الملف إلى قائمة الانتظار
-                        addToFailedQueue(finalMp4Path, username, ctx.chat.id);
+                        // حساب حجم الملف
+                        const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
+                        const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
+                        
+                        // إضافة الملف إلى قائمة الانتظار في DB
+                        await addFailedUpload({
+                            username,
+                            filepath: finalMp4Path,
+                            chatId: ctx.chat.id,
+                            error: processingError.message || 'Unknown error',
+                            fileSize,
+                            attempts: 0
+                        });
                         
                         if (isTokenError) {
                             // خطأ Token - إرسال رابط تجديد
@@ -343,13 +460,13 @@ async function handleRecordLive(ctx, username) {
                             
                             await ctx.reply(
                                 `🔐 *انتهت صلاحية Google Drive Token*\n\n` +
-                                `📁 تم الاحتفاظ بالملف وإضافته لقائمة الانتظار\n` +
-                                `📊 الملفات المنتظرة: ${getQueueSize()}\n\n` +
+                                `📁 تم حفظ الفيديو وإضافته لقائمة الانتظار\n` +
+                                `� الحجم: ${fileSize}\n\n` +
                                 `⚡ *لتجديد Token والرفع التلقائي:*\n` +
                                 `1️⃣ [اضغط هنا للتفويض](${oauthUrl})\n` +
                                 `2️⃣ سجل الدخول بحساب Google\n` +
                                 `3️⃣ انسخ الكود وأرسله هنا\n\n` +
-                                `💡 أو استخدم: /refresh_token`,
+                                `💡 أو استخدم: /update_token`,
                                 { parse_mode: 'Markdown', disable_web_page_preview: true }
                             );
                             
@@ -403,6 +520,80 @@ async function handleRecordLive(ctx, username) {
         await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, 'حدث خطأ عام أثناء محاولة بدء التسجيل.');
     }
 }
+
+// دالة مساعدة لإعادة رفع الفيديوهات
+async function retryUploadVideos(videos, ctx) {
+    let successCount = 0;
+    let failedCount = 0;
+    
+    for (const video of videos) {
+        // التحقق من وجود الملف
+        if (!fs.existsSync(video.filepath)) {
+            console.log(`[Retry] ❌ الملف غير موجود: ${video.filepath}`);
+            await removeFailedUpload(video.id);
+            failedCount++;
+            await ctx.reply(`❌ الملف غير موجود: ${video.filepath.split('/').pop()}`);
+            continue;
+        }
+        
+        // تحديث عدد المحاولات
+        await incrementFailedUploadAttempts(video.id);
+        
+        try {
+            await ctx.reply(`🔄 جاري رفع: ${video.filepath.split('/').pop()}...`);
+            
+            // محاولة الرفع
+            const driveResult = await uploadVideoToDrive(video.filepath, video.username);
+            
+            // نجح الرفع
+            console.log(`[Retry] ✅ تم رفع الملف بنجاح: ${video.filepath}`);
+            await updateUploadStats(true);
+            
+            await ctx.reply(
+                `✅ تم رفع الفيديو بنجاح!\n\n` +
+                `📁 اسم الملف: ${driveResult.name}\n` +
+                `📊 الحجم: ${(driveResult.size / 1024 / 1024).toFixed(2)} MB\n\n` +
+                `🔗 رابط المشاهدة:\n${driveResult.directLink}`
+            );
+            
+            // حذف الملف المحلي بعد نجاح الرفع
+            try {
+                fs.unlinkSync(video.filepath);
+                console.log(`[Retry] 🗑️ تم حذف الملف المحلي: ${video.filepath}`);
+            } catch (deleteError) {
+                console.error(`[Retry] ⚠️ فشل حذف الملف: ${deleteError.message}`);
+            }
+            
+            // إزالة من قائمة الانتظار
+            await removeFailedUpload(video.id);
+            successCount++;
+            
+        } catch (error) {
+            console.error(`[Retry] ❌ فشل رفع الملف: ${video.filepath}`, error.message);
+            failedCount++;
+            
+            await ctx.reply(
+                `❌ فشل رفع: ${video.filepath.split('/').pop()}\n` +
+                `السبب: ${error.message}`
+            );
+        }
+    }
+    
+    // إرسال ملخص نهائي
+    await ctx.reply(
+        `📊 *ملخص إعادة الرفع:*\n\n` +
+        `✅ نجح: ${successCount}\n` +
+        `❌ فشل: ${failedCount}\n` +
+        `📦 إجمالي: ${videos.length}`,
+        { parse_mode: 'Markdown' }
+    );
+}
+
+// زر إلغاء إعادة الرفع
+bot.action('cancel_retry', async (ctx) => {
+    await ctx.answerCbQuery('تم الإلغاء');
+    await ctx.editMessageText('✅ تم إلغاء إعادة الرفع. يمكنك استخدام /failed_videos لاحقاً.');
+});
 
 async function startApp() {
     try {

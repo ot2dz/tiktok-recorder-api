@@ -2,6 +2,7 @@ import { google } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import 'dotenv/config';
+import { getGoogleRefreshToken, updateTokenLastUsed } from './db.service.js';
 
 // متغير لتخزين نسخة drive بعد تهيئتها لتجنب إعادة التهيئة مع كل عملية رفع
 let drive = null;
@@ -15,14 +16,18 @@ async function initializeDrive() {
     if (drive) return drive;
 
     try {
-        // 1. قراءة بيانات الاعتماد مباشرة من process.env
+        // 1. قراءة بيانات الاعتماد من process.env و DB
         const clientId = process.env.GOOGLE_CLIENT_ID;
         const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-        const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+        const refreshToken = await getGoogleRefreshToken(); // قراءة من DB
 
         // التحقق من وجود جميع المتغيرات المطلوبة لضمان عدم حدوث أخطاء
-        if (!clientId || !clientSecret || !refreshToken) {
-            throw new Error('متغيرات Google Drive (CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN) غير موجودة أو غير كاملة في ملف .env');
+        if (!clientId || !clientSecret) {
+            throw new Error('متغيرات Google Drive (CLIENT_ID, CLIENT_SECRET) غير موجودة في Environment Variables');
+        }
+        
+        if (!refreshToken) {
+            throw new Error('GOOGLE_REFRESH_TOKEN غير موجود في قاعدة البيانات. استخدم /update_token لتعيينه.');
         }
 
         // 2. إنشاء عميل OAuth2 باستخدام بيانات الاعتماد
@@ -35,7 +40,7 @@ async function initializeDrive() {
 
         // 4. إنشاء خدمة Drive وتخزينها في المتغير العام
         drive = google.drive({ version: 'v3', auth: oAuth2Client });
-        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (باستخدام متغيرات البيئة).');
+        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (Token من قاعدة البيانات).');
         return drive;
 
     } catch (error) {
@@ -87,6 +92,9 @@ async function uploadVideoToDrive(filePath, username) {
         
         const uploadedFile = response.data;
         console.log(`[Google Drive] ✅ تم الرفع بنجاح! معرف الملف: ${uploadedFile.id}`);
+
+        // تحديث آخر استخدام ناجح للـ Token
+        await updateTokenLastUsed();
 
         // جعل الملف قابلاً للمشاهدة من قبل أي شخص لديه الرابط
         await makeFilePublic(uploadedFile.id);
