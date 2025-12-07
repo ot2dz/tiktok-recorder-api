@@ -1,6 +1,5 @@
 import express from 'express';
 import { exchangeCodeForToken, saveTokensToDb, notifyUserTokenSuccess } from './services/oauth-telegram.service.js';
-import { logger } from './utils/logger.util.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,11 +8,11 @@ const PORT = process.env.PORT || 3000;
 app.get('/oauth/callback', async (req, res) => {
     const { code, state, error } = req.query;
 
-    logger.info('[OAuth Server] 📥 استقبال callback من Google');
+    console.log('[OAuth Server] 📥 استقبال callback من Google');
 
     // التحقق من وجود خطأ
     if (error) {
-        logger.error(`[OAuth Server] ❌ خطأ من Google: ${error}`);
+        console.error(`[OAuth Server] ❌ خطأ من Google: ${error}`);
         return res.status(400).send(`
             <!DOCTYPE html>
             <html dir="rtl">
@@ -39,7 +38,7 @@ app.get('/oauth/callback', async (req, res) => {
 
     // التحقق من وجود Code
     if (!code) {
-        logger.error('[OAuth Server] ❌ Code مفقود');
+        console.error('[OAuth Server] ❌ Code مفقود');
         return res.status(400).send(`
             <!DOCTYPE html>
             <html dir="rtl">
@@ -66,12 +65,12 @@ app.get('/oauth/callback', async (req, res) => {
     const chatId = state; // chatId محفوظ في state parameter
 
     try {
-        logger.info(`[OAuth Server] 🔄 استبدال Code بـ Tokens... (Chat ID: ${chatId})`);
+        console.log(`[OAuth Server] 🔄 استبدال Code بـ Tokens... (Chat ID: ${chatId})`);
 
         // استبدال Code بـ Access Token + Refresh Token
         const tokens = await exchangeCodeForToken(code);
 
-        logger.info('[OAuth Server] ✅ تم الحصول على Tokens بنجاح');
+        console.log('[OAuth Server] ✅ تم الحصول على Tokens بنجاح');
 
         // حفظ Tokens في قاعدة البيانات
         await saveTokensToDb({
@@ -80,12 +79,12 @@ app.get('/oauth/callback', async (req, res) => {
             expiryDate: tokens.expiry_date
         });
 
-        logger.info('[OAuth Server] ✅ تم حفظ Tokens في قاعدة البيانات');
+        console.log('[OAuth Server] ✅ تم حفظ Tokens في قاعدة البيانات');
 
         // إرسال إشعار للمستخدم في Telegram
         if (chatId) {
             await notifyUserTokenSuccess(chatId);
-            logger.info(`[OAuth Server] ✅ تم إرسال إشعار للمستخدم: ${chatId}`);
+            console.log(`[OAuth Server] ✅ تم إرسال إشعار للمستخدم: ${chatId}`);
         }
 
         // صفحة نجاح
@@ -164,7 +163,7 @@ app.get('/oauth/callback', async (req, res) => {
         `);
 
     } catch (error) {
-        logger.error(`[OAuth Server] ❌ فشل: ${error.message}`);
+        console.error(`[OAuth Server] ❌ فشل: ${error.message}`);
 
         res.status(500).send(`
             <!DOCTYPE html>
@@ -252,8 +251,8 @@ app.get('/', (req, res) => {
 
 export function startServer() {
     app.listen(PORT, () => {
-        logger.info(`[OAuth Server] 🚀 يعمل على: http://localhost:${PORT}`);
-        logger.info(`[OAuth Server] 📍 OAuth Callback: http://localhost:${PORT}/oauth/callback`);
+        console.log(`[OAuth Server] 🚀 يعمل على: http://localhost:${PORT}`);
+        console.log(`[OAuth Server] 📍 OAuth Callback: http://localhost:${PORT}/oauth/callback`);
     });
 }
 
