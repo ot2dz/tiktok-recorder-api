@@ -13,7 +13,7 @@ import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideoToDrive } from './services/drive.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
-import { generateOAuthUrl, exchangeCodeForToken, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
+import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
 
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -69,22 +69,44 @@ bot.hears(MANAGE_MONITOR_BTN, (ctx) => {
 // أمر تحديث Token
 bot.command('update_token', async (ctx) => {
     try {
+        const redirectUri = process.env.OAUTH_REDIRECT_URI;
         const authUrl = generateOAuthUrl(ctx.chat.id);
         
-        await ctx.reply(
-            '🔐 *تحديث Google Drive Token*\n\n' +
-            '📌 اتبع الخطوات التالية:\n\n' +
-            '1️⃣ افتح الرابط أدناه في المتصفح\n' +
-            '2️⃣ سجل الدخول بحساب Google\n' +
-            '3️⃣ اسمح بالصلاحيات\n' +
-            '4️⃣ انسخ الكود الذي سيظهر لك\n' +
-            '5️⃣ أرسل الكود هنا في المحادثة\n\n' +
-            `🔗 [اضغط هنا للتفويض](${authUrl})\n\n` +
-            '⏰ لديك 15 دقيقة لإكمال العملية.',
-            { parse_mode: 'Markdown', disable_web_page_preview: true }
-        );
+        // التحقق من نوع OAuth المستخدم
+        const isAutomatic = redirectUri && !redirectUri.includes('urn:ietf:wg:oauth');
         
-        userState[ctx.chat.id] = 'waiting_for_oauth_code';
+        if (isAutomatic) {
+            // طريقة OAuth التلقائية (مثل n8n)
+            await ctx.reply(
+                '🔐 *تحديث Google Drive Token*\n\n' +
+                '✨ *طريقة سهلة وسريعة!*\n\n' +
+                '📌 الخطوات:\n\n' +
+                '1️⃣ اضغط على الرابط أدناه\n' +
+                '2️⃣ سجل الدخول بحساب Google\n' +
+                '3️⃣ اسمح بالصلاحيات\n' +
+                '4️⃣ انتهى! 🎉\n\n' +
+                '🔄 *Token سيتم تجديده تلقائياً كل 50 دقيقة*\n\n' +
+                `🔗 [اضغط هنا للربط](${authUrl})\n\n` +
+                '💡 بعد الموافقة، ستصلك رسالة تأكيد هنا تلقائياً.',
+                { parse_mode: 'Markdown', disable_web_page_preview: true }
+            );
+        } else {
+            // الطريقة اليدوية (التوافق مع القديم)
+            await ctx.reply(
+                '🔐 *تحديث Google Drive Token*\n\n' +
+                '📌 اتبع الخطوات التالية:\n\n' +
+                '1️⃣ افتح الرابط أدناه في المتصفح\n' +
+                '2️⃣ سجل الدخول بحساب Google\n' +
+                '3️⃣ اسمح بالصلاحيات\n' +
+                '4️⃣ انسخ الكود الذي سيظهر لك\n' +
+                '5️⃣ أرسل الكود هنا في المحادثة\n\n' +
+                `🔗 [اضغط هنا للتفويض](${authUrl})\n\n` +
+                '⏰ لديك 15 دقيقة لإكمال العملية.',
+                { parse_mode: 'Markdown', disable_web_page_preview: true }
+            );
+            
+            userState[ctx.chat.id] = 'waiting_for_oauth_code';
+        }
     } catch (error) {
         console.error('[Bot] خطأ في أمر update_token:', error);
         await ctx.reply('❌ حدث خطأ أثناء توليد رابط التفويض.');
@@ -295,19 +317,19 @@ bot.on(message('text'), async (ctx) => {
         return;
     }
     
-    // معالجة كود OAuth
+    // معالجة كود OAuth (للتوافق مع الطريقة القديمة)
     if (currentState === 'waiting_for_oauth_code') {
         delete userState[chatId];
         
         try {
             await ctx.reply('⏳ جاري معالجة الكود...');
             
-            const refreshToken = await exchangeCodeForToken(chatId, username);
-            await saveRefreshToken(refreshToken);
+            const refreshToken = await exchangeCodeForTokenLegacy(chatId, username);
             
             await ctx.reply(
                 '✅ *تم تحديث Token بنجاح!*\n\n' +
-                '🔄 هل تريد إعادة رفع الفيديوهات الفاشلة؟',
+                '🔄 *Token يتم تجديده تلقائياً كل 50 دقيقة*\n\n' +
+                'هل تريد إعادة رفع الفيديوهات الفاشلة؟',
                 {
                     parse_mode: 'Markdown',
                     ...Markup.inlineKeyboard([
@@ -595,20 +617,8 @@ bot.action('cancel_retry', async (ctx) => {
     await ctx.editMessageText('✅ تم إلغاء إعادة الرفع. يمكنك استخدام /failed_videos لاحقاً.');
 });
 
-async function startApp() {
-    try {
-        await setupDatabase();
-        startMonitoring(bot, handleRecordLive);
-        bot.launch();
-        console.log('البوت وخدمة المراقبة يعملان الآن...');
-        process.once('SIGINT', () => bot.stop('SIGINT'));
-        process.once('SIGTERM', () => bot.stop('SIGTERM'));
-    } catch (error) {
-        console.error("فشل بدء تشغيل التطبيق:", error);
-        process.exit(1);
-    }
-}
+// تصدير Bot للاستخدام من index.js
+export default bot;
 
-startApp();
-
+// تصدير دوال مساعدة
 export { handleRecordLive };

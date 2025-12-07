@@ -2,45 +2,56 @@ import { google } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import 'dotenv/config';
-import { getGoogleRefreshToken, updateTokenLastUsed } from './db.service.js';
+import { getGoogleRefreshToken, updateTokenLastUsed, getTokensFromDb, saveTokensToDb } from './db.service.js';
 
 // متغير لتخزين نسخة drive بعد تهيئتها لتجنب إعادة التهيئة مع كل عملية رفع
 let drive = null;
+let oauth2Client = null;
+let tokenRefreshTimer = null;
 
 /**
- * تهيئة Google Drive API باستخدام متغيرات البيئة (الطريقة الاحترافية).
- * يقوم بقراءة البيانات من .env وإنشاء عميل مصادقة جاهز للاستخدام.
+ * تهيئة Google Drive API باستخدام Tokens من قاعدة البيانات.
+ * يقوم بقراءة Access Token + Refresh Token وإعداد Auto-Refresh.
  */
 async function initializeDrive() {
     // إذا تم تهيئة drive من قبل، قم بإرجاعه مباشرة لتجنب العمليات المكررة
-    if (drive) return drive;
+    if (drive && oauth2Client) return drive;
 
     try {
         // 1. قراءة بيانات الاعتماد من process.env و DB
         const clientId = process.env.GOOGLE_CLIENT_ID;
         const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-        const refreshToken = await getGoogleRefreshToken(); // قراءة من DB
+        const redirectUri = process.env.OAUTH_REDIRECT_URI || 'urn:ietf:wg:oauth:2.0:oob';
+        
+        const tokens = await getTokensFromDb(); // قراءة Access + Refresh من DB
 
         // التحقق من وجود جميع المتغيرات المطلوبة لضمان عدم حدوث أخطاء
         if (!clientId || !clientSecret) {
             throw new Error('متغيرات Google Drive (CLIENT_ID, CLIENT_SECRET) غير موجودة في Environment Variables');
         }
         
-        if (!refreshToken) {
+        if (!tokens.refreshToken) {
             throw new Error('GOOGLE_REFRESH_TOKEN غير موجود في قاعدة البيانات. استخدم /update_token لتعيينه.');
         }
 
         // 2. إنشاء عميل OAuth2 باستخدام بيانات الاعتماد
-        const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret);
+        oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 
-        // 3. تعيين التوكن الدائم للعميل، مما يسمح له بتجديد صلاحية الوصول تلقائيًا
-        oAuth2Client.setCredentials({
-            refresh_token: refreshToken
+        // 3. تعيين التوكنات (Access + Refresh + Expiry)
+        oauth2Client.setCredentials({
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
+            expiry_date: tokens.expiryDate
         });
 
         // 4. إنشاء خدمة Drive وتخزينها في المتغير العام
-        drive = google.drive({ version: 'v3', auth: oAuth2Client });
-        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (Token من قاعدة البيانات).');
+        drive = google.drive({ version: 'v3', auth: oauth2Client });
+        
+        console.log('[Google Drive] ✅ تم تهيئة Google Drive API بنجاح (Tokens من قاعدة البيانات).');
+        
+        // 5. بدء Auto-Refresh للـ Access Token
+        startAutoRefresh();
+        
         return drive;
 
     } catch (error) {
@@ -148,10 +159,59 @@ async function makeFilePublic(fileId) {
  */
 function resetDriveClient() {
     drive = null;
+    oauth2Client = null;
+    
+    // إيقاف Auto-Refresh القديم
+    if (tokenRefreshTimer) {
+        clearInterval(tokenRefreshTimer);
+        tokenRefreshTimer = null;
+    }
+    
     console.log('[Google Drive] 🔄 تم إعادة تعيين Drive Client - سيُستخدم Token الجديد في المرة القادمة');
 }
 
-// تصدير الدوال التي سيتم استخدامها في الملفات الأخرى (مثل bot.js)
+/**
+ * تجديد تلقائي للـ Access Token كل 50 دقيقة
+ * يعمل في الخلفية لضمان عدم انتهاء صلاحية Token
+ */
+function startAutoRefresh() {
+    // إيقاف أي timer سابق
+    if (tokenRefreshTimer) {
+        clearInterval(tokenRefreshTimer);
+    }
+
+    console.log('[Google Drive] ⏰ بدء Auto-Refresh: كل 50 دقيقة');
+
+    // تجديد كل 50 دقيقة (Access Token ينتهي بعد 60 دقيقة)
+    tokenRefreshTimer = setInterval(async () => {
+        try {
+            console.log('[Google Drive] 🔄 Auto-Refresh: جاري تجديد Access Token...');
+            
+            if (!oauth2Client) {
+                console.warn('[Google Drive] ⚠️ OAuth Client غير متوفر - تخطي Auto-Refresh');
+                return;
+            }
+
+            // تجديد Token
+            const { credentials } = await oauth2Client.refreshAccessToken();
+            
+            // حفظ Token الجديد في DB
+            await saveTokensToDb({
+                accessToken: credentials.access_token,
+                refreshToken: credentials.refresh_token,
+                expiryDate: credentials.expiry_date
+            });
+            
+            console.log('[Google Drive] ✅ Auto-Refresh: تم تجديد Access Token بنجاح');
+            console.log(`[Google Drive] ⏳ Token الجديد صالح حتى: ${new Date(credentials.expiry_date).toLocaleString('ar-DZ')}`);
+            
+        } catch (error) {
+            console.error('[Google Drive] ❌ Auto-Refresh: فشل تجديد Token:', error.message);
+            console.error('[Google Drive] 💡 قد تحتاج لتحديث Token يدوياً عبر /update_token');
+        }
+    }, 50 * 60 * 1000); // 50 دقيقة
+}
+
 export {
     uploadVideoToDrive,
     resetDriveClient

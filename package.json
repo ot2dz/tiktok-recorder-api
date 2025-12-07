@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "Telegram bot for recording TikTok live streams",
   "type": "module",
-  "main": "src/bot.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node src/bot.js",
-    "dev": "nodemon src/bot.js",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -22,6 +22,7 @@
     "axios": "^1.6.0",
     "cloudinary": "^2.8.0",
     "dotenv": "^16.3.1",
+    "express": "^5.2.1",
     "ffmpeg-static": "^5.2.0",
     "fluent-ffmpeg": "^2.1.2",
     "fs": "^0.0.1-security",

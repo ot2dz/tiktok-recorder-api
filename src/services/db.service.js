@@ -18,6 +18,8 @@ export async function setupDatabase() {
         monitoredUsers: [],
         settings: {
             googleRefreshToken: null,
+            googleAccessToken: null,
+            tokenExpiryDate: null,
             tokenLastUpdated: null,
             tokenLastUsed: null
         },
@@ -33,7 +35,13 @@ export async function setupDatabase() {
     
     // التأكد من وجود الهيكل الكامل
     db.data ||= { monitoredUsers: [], settings: {}, failedUploads: [], stats: {} };
-    db.data.settings ||= { googleRefreshToken: null, tokenLastUpdated: null, tokenLastUsed: null };
+    db.data.settings ||= { 
+        googleRefreshToken: null, 
+        googleAccessToken: null,
+        tokenExpiryDate: null,
+        tokenLastUpdated: null, 
+        tokenLastUsed: null 
+    };
     db.data.failedUploads ||= [];
     db.data.stats ||= { totalUploads: 0, successfulUploads: 0, failedUploads: 0 };
     
@@ -87,6 +95,30 @@ export async function saveGoogleRefreshToken(token) {
     db.data.settings.tokenLastUpdated = new Date().toISOString();
     await db.write();
     console.log('[DB] ✅ تم حفظ Google Refresh Token الجديد');
+}
+
+// دالة لحفظ كامل Tokens (Access + Refresh + Expiry)
+export async function saveTokensToDb({ accessToken, refreshToken, expiryDate }) {
+    await db.read();
+    db.data.settings = db.data.settings || {};
+    
+    if (accessToken) db.data.settings.googleAccessToken = accessToken;
+    if (refreshToken) db.data.settings.googleRefreshToken = refreshToken;
+    if (expiryDate) db.data.settings.tokenExpiryDate = expiryDate;
+    
+    db.data.settings.tokenLastUpdated = new Date().toISOString();
+    await db.write();
+    console.log('[DB] ✅ تم حفظ Tokens (Access + Refresh + Expiry)');
+}
+
+// دالة للحصول على كامل Tokens
+export async function getTokensFromDb() {
+    await db.read();
+    return {
+        accessToken: db.data.settings?.googleAccessToken || null,
+        refreshToken: db.data.settings?.googleRefreshToken || null,
+        expiryDate: db.data.settings?.tokenExpiryDate || null
+    };
 }
 
 // دالة لتحديث آخر استخدام ناجح للـ Token

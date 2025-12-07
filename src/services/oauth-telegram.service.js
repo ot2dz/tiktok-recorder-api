@@ -1,25 +1,37 @@
 import { google } from 'googleapis';
 import fs from 'fs';
 import 'dotenv/config';
-import { saveGoogleRefreshToken, getTokenStatus } from './db.service.js';
+import { saveGoogleRefreshToken, getTokenStatus, saveTokensToDb } from './db.service.js';
 
 /**
- * خدمة لإدارة OAuth عبر التليجرام
- * تسمح للمستخدم بتجديد Refresh Token من خلال محادثة التليجرام
+ * خدمة لإدارة OAuth عبر التليجرام والـ HTTP Callback
+ * تسمح للمستخدم بتجديد Token من خلال محادثة التليجرام أو OAuth Redirect
  */
 
 // متغير لتخزين حالة الـ OAuth للمستخدمين
 const pendingOAuthStates = new Map();
 
+// متغير لحفظ Bot instance (سيتم تعيينه من bot.js)
+let botInstance = null;
+
 /**
- * توليد رابط OAuth للمستخدم
+ * تعيين Bot instance للاستخدام في الإشعارات
+ * @param {Telegraf} bot - instance البوت
+ */
+function setBotInstance(bot) {
+    botInstance = bot;
+    console.log('[OAuth Telegram] ✅ تم تعيين Bot instance');
+}
+
+/**
+ * توليد رابط OAuth للمستخدم (طريقة جديدة مع Redirect URI)
  * @param {number} chatId - معرف المحادثة
  * @returns {string} رابط التفويض
  */
 function generateOAuthUrl(chatId) {
     const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
     const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-    const REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob';
+    const REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || 'urn:ietf:wg:oauth:2.0:oob';
     const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
     const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
@@ -27,7 +39,8 @@ function generateOAuthUrl(chatId) {
     const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
         scope: SCOPES,
-        prompt: 'consent'
+        prompt: 'consent',
+        state: chatId.toString() // نحفظ chatId في state للـ callback
     });
 
     // حفظ حالة OAuth للمستخدم
@@ -40,12 +53,37 @@ function generateOAuthUrl(chatId) {
 }
 
 /**
- * استبدال الكود بـ Refresh Token
+ * استبدال الكود بـ Tokens (للاستخدام من HTTP Callback أو Telegram)
+ * @param {string} code - الكود من Google
+ * @returns {Promise<object>} Tokens object { access_token, refresh_token, expiry_date }
+ */
+async function exchangeCodeForToken(code) {
+    const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+    const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+    const REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || 'urn:ietf:wg:oauth:2.0:oob';
+
+    const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+
+    try {
+        const { tokens } = await oauth2Client.getToken(code.trim());
+        
+        if (!tokens.refresh_token) {
+            throw new Error('لم يتم الحصول على refresh_token. قد تحتاج لإلغاء الصلاحيات من: https://myaccount.google.com/permissions');
+        }
+
+        return tokens;
+    } catch (error) {
+        throw new Error(`فشل استبدال الكود: ${error.message}`);
+    }
+}
+
+/**
+ * استبدال الكود من Telegram (للتوافق مع الطريقة القديمة)
  * @param {number} chatId - معرف المحادثة
  * @param {string} code - الكود من Google
  * @returns {Promise<string>} Refresh Token الجديد
  */
-async function exchangeCodeForToken(chatId, code) {
+async function exchangeCodeForTokenLegacy(chatId, code) {
     const state = pendingOAuthStates.get(chatId);
     
     if (!state) {
@@ -68,6 +106,13 @@ async function exchangeCodeForToken(chatId, code) {
 
         // تنظيف الحالة
         pendingOAuthStates.delete(chatId);
+        
+        // حفظ Tokens
+        await saveTokensToDb({
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            expiryDate: tokens.expiry_date
+        });
         
         return tokens.refresh_token;
     } catch (error) {
@@ -140,13 +185,40 @@ function cleanupExpiredStates() {
     }
 }
 
+/**
+ * إرسال إشعار للمستخدم بنجاح ربط الحساب
+ * @param {number} chatId - معرف المحادثة
+ */
+async function notifyUserTokenSuccess(chatId) {
+    if (!botInstance) {
+        console.warn('[OAuth Telegram] ⚠️ Bot instance غير متوفر - لا يمكن إرسال إشعار');
+        return;
+    }
+
+    try {
+        await botInstance.telegram.sendMessage(
+            chatId,
+            '✅ *تم ربط حسابك بنجاح!*\n\n' +
+            '🔄 *Token سيتم تجديده تلقائياً كل 50 دقيقة*\n\n' +
+            '💡 يمكنك الآن استخدام البوت بدون قلق من انتهاء Token.',
+            { parse_mode: 'Markdown' }
+        );
+    } catch (error) {
+        console.error('[OAuth Telegram] ❌ فشل إرسال إشعار:', error.message);
+    }
+}
+
 // تنظيف تلقائي كل 30 دقيقة
 setInterval(cleanupExpiredStates, 30 * 60 * 1000);
 
 export {
+    setBotInstance,
     generateOAuthUrl,
     exchangeCodeForToken,
+    exchangeCodeForTokenLegacy,
     saveRefreshToken,
+    saveTokensToDb,
     validateRefreshToken,
+    notifyUserTokenSuccess,
     pendingOAuthStates
 };
