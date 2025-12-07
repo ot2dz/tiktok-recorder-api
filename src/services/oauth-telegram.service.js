@@ -85,6 +85,12 @@ async function saveRefreshToken(refreshToken) {
     try {
         await saveGoogleRefreshToken(refreshToken);
         console.log('[OAuth Telegram] ✅ تم حفظ Refresh Token الجديد في قاعدة البيانات');
+        
+        // إعادة تعيين Drive Client لاستخدام Token الجديد فوراً
+        const { resetDriveClient } = await import('./drive.service.js');
+        resetDriveClient();
+        
+        console.log('[OAuth Telegram] 🔄 تم إعادة تعيين Drive Client - جاهز للاستخدام مع Token الجديد');
     } catch (error) {
         console.error('[OAuth Telegram] ❌ فشل حفظ Token:', error.message);
         throw error;

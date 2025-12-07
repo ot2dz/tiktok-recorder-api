@@ -142,7 +142,17 @@ async function makeFilePublic(fileId) {
     }
 }
 
+/**
+ * إعادة تعيين Drive Client (استخدم بعد تحديث Token)
+ * هذه الدالة تُجبر النظام على إنشاء client جديد بـ Token الجديد
+ */
+function resetDriveClient() {
+    drive = null;
+    console.log('[Google Drive] 🔄 تم إعادة تعيين Drive Client - سيُستخدم Token الجديد في المرة القادمة');
+}
+
 // تصدير الدوال التي سيتم استخدامها في الملفات الأخرى (مثل bot.js)
 export {
-    uploadVideoToDrive
+    uploadVideoToDrive,
+    resetDriveClient
 };
