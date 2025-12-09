@@ -10,7 +10,8 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
-import { uploadVideoToDrive } from './services/drive.service.js';
+import { uploadVideoToS3 } from './services/s3.service.js';
+import { notifyN8nToUpload } from './services/n8n.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
@@ -428,40 +429,41 @@ async function handleRecordLive(ctx, username) {
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
                 let uploadSuccessful = false;
-                let driveResult = null;
+                let s3Result = null;
 
                 try {
                     // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
-                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري أرشفة الفيديو ومعالجته...`);
+                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري حفظ الفيديو...`);
                     
-                    // الخطوة 2: الرفع إلى Google Drive
-                    console.log(`[Upload] 📤 بدء رفع الملف إلى Google Drive: ${finalMp4Path}`);
-                    const driveResult = await uploadVideoToDrive(finalMp4Path, username);
+                    // الخطوة 2: رفع الفيديو إلى Cloudflare R2
+                    console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudflare R2: ${finalMp4Path}`);
+                    s3Result = await uploadVideoToS3(finalMp4Path, username);
                     
-                    // ✅ تأكيد نجاح الرفع
+                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى S3`);
+                    
+                    // الخطوة 3: إرسال إشعار إلى n8n
+                    console.log(`[Upload] 📨 إرسال إشعار إلى n8n...`);
+                    const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
+                    
                     uploadSuccessful = true;
-                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى Google Drive`);
                     
                     // تحديث الإحصائيات
                     await updateUploadStats(true);
                     
-                    // إرسال رابط Google Drive فقط
+                    // إرسال رسالة للمستخدم
                     await ctx.reply(
-                        `✅ تم رفع الفيديو بنجاح!\n\n` +
-                        `📁 اسم الملف: ${driveResult.name}\n` +
-                        `📊 الحجم: ${(driveResult.size / 1024 / 1024).toFixed(2)} MB\n\n` +
-                        `🔗 رابط المشاهدة والتحميل:\n${driveResult.directLink}\n\n` +
-                        `💡 يمكنك مشاهدة الفيديو مباشرة أو تحميله من Google Drive`
+                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                        `👤 المستخدم: ${username}\n` +
+                        `📁 اسم الملف: ${s3Result.filename}\n` +
+                        `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\n\n` +
+                        `⏳ جاري الرفع إلى Google Drive...\n` +
+                        `� سيتم إرسال رابط المشاهدة عند انتهاء الرفع.`
                     );
 
                 } catch (processingError) {
-                    console.error("❌ خطأ أثناء الرفع أو الإرسال بعد التسجيل:", processingError);
+                    console.error("❌ خطأ أثناء الرفع:", processingError);
                     
                     if (!uploadSuccessful) {
-                        // التحقق من نوع الخطأ
-                        const isTokenError = processingError.isTokenExpired || 
-                                           (processingError.message && processingError.message.includes('invalid_grant'));
-                        
                         // حساب حجم الملف
                         const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
                         const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
