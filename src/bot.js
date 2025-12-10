@@ -24,7 +24,35 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const userState = {};
-const activeRecordings = {};
+
+// إعادة هيكلة لدعم التسجيلات المتعددة
+const activeRecordings = new Map(); // Map<recordingId, recordingData>
+const userRecordings = new Map(); // Map<chatId, Set<recordingId>>
+
+// دالة مساعدة لتوليد recordingId فريد
+function generateRecordingId(username, chatId) {
+    return `${username}_${chatId}_${Date.now()}`;
+}
+
+// دالة للحصول على تسجيلات المستخدم
+function getUserRecordings(chatId) {
+    if (!userRecordings.has(chatId)) {
+        userRecordings.set(chatId, new Set());
+    }
+    return userRecordings.get(chatId);
+}
+
+// دالة للتحقق من وجود تسجيل لنفس username
+function isUsernameAlreadyRecording(chatId, username) {
+    const recordings = getUserRecordings(chatId);
+    for (const recordingId of recordings) {
+        const recording = activeRecordings.get(recordingId);
+        if (recording && recording.username === username) {
+            return true;
+        }
+    }
+    return false;
+}
 
 const CHECK_STATUS_BTN = '🔍 فحص حالة البث';
 const RECORD_LIVE_BTN = '🔴 بدء تسجيل بث';
@@ -39,11 +67,104 @@ bot.start((ctx) => {
     ctx.reply(
         'أهلاً بك! اختر أحد الخيارات من القائمة للبدء.\n\n' +
         '📌 أوامر إضافية:\n' +
+        '/list - عرض التسجيلات النشطة\n' +
+        '/stop <username> - إيقاف تسجيل محدد\n' +
+        '/stop all - إيقاف جميع التسجيلات\n' +
         '/failed_videos - عرض الفيديوهات الفاشلة\n' +
         '/update_token - تحديث Google Drive Token\n' +
         '/token_status - حالة Token',
         mainKeyboard
     );
+});
+
+// أمر /list: عرض التسجيلات النشطة
+bot.command('list', (ctx) => {
+    const userRecs = getUserRecordings(ctx.chat.id);
+    
+    if (userRecs.size === 0) {
+        ctx.reply('📋 لا توجد تسجيلات نشطة حالياً.');
+        return;
+    }
+    
+    let message = `📋 *التسجيلات النشطة* (${userRecs.size}/3):\n\n`;
+    
+    for (const recordingId of userRecs) {
+        const recording = activeRecordings.get(recordingId);
+        if (recording) {
+            const duration = Math.floor((Date.now() - recording.startTime) / 1000);
+            const minutes = Math.floor(duration / 60);
+            const seconds = duration % 60;
+            
+            message += `🔴 *${recording.username}*\n`;
+            message += `⏱️ المدة: ${minutes}:${seconds.toString().padStart(2, '0')}\n`;
+            message += `📝 ID: \`${recording.username}\`\n\n`;
+        }
+    }
+    
+    message += `💡 لإيقاف تسجيل: /stop <username>\n`;
+    message += `💡 لإيقاف الكل: /stop all`;
+    
+    ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+// أمر /stop: إيقاف تسجيل محدد أو الكل
+bot.command('stop', async (ctx) => {
+    const args = ctx.message.text.split(' ').slice(1);
+    
+    if (args.length === 0) {
+        ctx.reply(
+            '❌ يجب تحديد اسم المستخدم أو "all"\n\n' +
+            'الاستخدام:\n' +
+            '/stop <username> - إيقاف تسجيل محدد\n' +
+            '/stop all - إيقاف جميع التسجيلات\n\n' +
+            'استخدم /list لعرض التسجيلات النشطة'
+        );
+        return;
+    }
+    
+    const target = args[0].toLowerCase();
+    const userRecs = getUserRecordings(ctx.chat.id);
+    
+    if (userRecs.size === 0) {
+        ctx.reply('📋 لا توجد تسجيلات نشطة لإيقافها.');
+        return;
+    }
+    
+    if (target === 'all') {
+        // إيقاف جميع التسجيلات
+        let stoppedCount = 0;
+        const recordingsToStop = Array.from(userRecs);
+        
+        for (const recordingId of recordingsToStop) {
+            const recording = activeRecordings.get(recordingId);
+            if (recording && recording.controller) {
+                recording.controller.abort();
+                stoppedCount++;
+            }
+        }
+        
+        ctx.reply(`⏹️ تم إيقاف ${stoppedCount} تسجيل(ات). سيتم معالجة الفيديوهات قريباً.`);
+    } else {
+        // إيقاف تسجيل محدد
+        const username = target;
+        let found = false;
+        
+        for (const recordingId of userRecs) {
+            const recording = activeRecordings.get(recordingId);
+            if (recording && recording.username === username) {
+                if (recording.controller) {
+                    recording.controller.abort();
+                    ctx.reply(`⏹️ تم إيقاف تسجيل ${username}. سيتم معالجة الفيديو قريباً.`);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        
+        if (!found) {
+            ctx.reply(`❌ لم يتم العثور على تسجيل نشط للمستخدم "${username}".\n\nاستخدم /list لعرض التسجيلات النشطة.`);
+        }
+    }
 });
 
 bot.hears(CHECK_STATUS_BTN, (ctx) => {
@@ -369,14 +490,15 @@ bot.on(message('text'), async (ctx) => {
 });
 
 bot.action(/stop_record_(.+)/, (ctx) => {
-    const username = ctx.match[1];
-    const recording = activeRecordings[username];
+    const recordingId = ctx.match[1];
+    const recording = activeRecordings.get(recordingId);
+    
     if (recording && recording.controller) {
-        ctx.answerCbQuery(`جاري إيقاف تسجيل ${username}...`);
+        ctx.answerCbQuery(`جاري إيقاف تسجيل ${recording.username}...`);
         recording.controller.abort();
-        ctx.editMessageText(`تم طلب إيقاف التسجيل للمستخدم ${username}. سيتم إرسال الفيديو المسجل قريبًا.`);
+        ctx.editMessageText(`تم طلب إيقاف التسجيل للمستخدم ${recording.username}. سيتم إرسال الفيديو المسجل قريبًا.`);
     } else {
-        ctx.answerCbQuery('لم يتم العثور على عملية تسجيل نشطة لهذا المستخدم.');
+        ctx.answerCbQuery('لم يتم العثور على عملية تسجيل نشطة.');
     }
 });
 
@@ -396,8 +518,22 @@ async function handleCheckStatus(ctx, username) {
 }
 
 async function handleRecordLive(ctx, username) {
-    if (activeRecordings[username]) {
-        await ctx.reply(`يوجد بالفعل عملية تسجيل جارية للمستخدم ${username}.`);
+    const chatId = ctx.chat.id;
+    const userRecs = getUserRecordings(chatId);
+    
+    // فحص 1: الحد الأقصى للتسجيلات المتزامنة
+    if (userRecs.size >= 3) {
+        await ctx.reply(
+            `❌ لقد وصلت للحد الأقصى من التسجيلات المتزامنة (3).\n\n` +
+            `استخدم /list لعرض التسجيلات النشطة\n` +
+            `استخدم /stop <username> لإيقاف تسجيل محدد`
+        );
+        return;
+    }
+    
+    // فحص 2: منع تسجيل نفس المستخدم مرتين
+    if (isUsernameAlreadyRecording(chatId, username)) {
+        await ctx.reply(`❌ يوجد بالفعل تسجيل نشط للمستخدم ${username}.`);
         return;
     }
 
@@ -416,14 +552,33 @@ async function handleRecordLive(ctx, username) {
             return;
         }
 
+        // إنشاء recordingId فريد
+        const recordingId = generateRecordingId(username, chatId);
         const controller = new AbortController();
+        
         const stopButton = Markup.inlineKeyboard([
-            Markup.button.callback('⏹️ إيقاف التسجيل', `stop_record_${username}`)
+            Markup.button.callback('⏹️ إيقاف التسجيل', `stop_record_${recordingId}`)
         ]);
 
-        const recordingMsg = await bot.telegram.editMessageText(ctx.chat.id, checkingMsg.message_id, undefined, `🔴 بدأ تسجيل البث للمستخدم ${username}...`, stopButton);
+        const recordingMsg = await bot.telegram.editMessageText(
+            ctx.chat.id, 
+            checkingMsg.message_id, 
+            undefined, 
+            `🔴 بدأ تسجيل البث للمستخدم ${username}...\n📊 التسجيلات النشطة: ${userRecs.size + 1}/3`, 
+            stopButton
+        );
         
-        activeRecordings[username] = { controller, messageId: recordingMsg.message_id, chatId: ctx.chat.id };
+        // حفظ بيانات التسجيل
+        activeRecordings.set(recordingId, {
+            username,
+            chatId,
+            controller,
+            messageId: recordingMsg.message_id,
+            startTime: Date.now()
+        });
+        
+        // إضافة recordingId إلى قائمة تسجيلات المستخدم
+        userRecs.add(recordingId);
 
         // ---  منطق محسّن مع حماية من حذف الملفات قبل رفعها ---
         recordLiveStream(streamUrl, username, controller.signal)
@@ -433,7 +588,7 @@ async function handleRecordLive(ctx, username) {
 
                 try {
                     // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
-                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل. جاري حفظ الفيديو...`);
+                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل لـ ${username}. جاري حفظ الفيديو...`);
                     
                     // الخطوة 2: رفع الفيديو إلى Cloudflare R2
                     console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudflare R2: ${finalMp4Path}`);
@@ -533,10 +688,14 @@ async function handleRecordLive(ctx, username) {
             })
             .finally(() => {
                 // تنظيف حالة التسجيل
-                delete activeRecordings[username];
+                activeRecordings.delete(recordingId);
+                userRecs.delete(recordingId);
+                
                 if (currentlyRecording.has(username)) {
                     currentlyRecording.delete(username);
                 }
+                
+                console.log(`[Cleanup] تم تنظيف التسجيل: ${recordingId}`);
             });
 
     } catch (error) {
@@ -624,3 +783,11 @@ export default bot;
 
 // تصدير دوال مساعدة
 export { handleRecordLive };
+
+// دالة للحصول على عدد التسجيلات النشطة لمستخدم
+export function getUserRecordingsCountForMonitoring(chatId) {
+    return getUserRecordings(chatId).size;
+}
+
+// تفعيل المراقبة التلقائية (يمكن تفعيلها من index.js)
+// startMonitoring(bot, handleRecordLive, getUserRecordingsCountForMonitoring);

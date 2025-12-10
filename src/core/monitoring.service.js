@@ -5,6 +5,7 @@ import * as dbService from '../services/db.service.js';
 const currentlyRecording = new Set();
 
 let handleRecordLive; // متغير لتخزين الدالة
+let getUserRecordingsCount; // دالة للحصول على عدد التسجيلات النشطة للمستخدم
 
 /**
  * دالة تقوم بفحص قائمة المراقبة مرة واحدة
@@ -17,6 +18,15 @@ async function checkMonitoredUsers(bot) {
         if (currentlyRecording.has(user.username)) continue;
 
         try {
+            // فحص الحد الأقصى للتسجيلات
+            if (getUserRecordingsCount) {
+                const activeCount = getUserRecordingsCount(user.chatId);
+                if (activeCount >= 3) {
+                    console.log(`[Monitor] المستخدم ${user.chatId} وصل للحد الأقصى (${activeCount}/3). تخطي المراقبة.`);
+                    continue;
+                }
+            }
+            
             const roomId = await tiktokService.getRoomId(user.username);
             if (roomId && await tiktokService.isUserLive(roomId)) {
                 console.log(`[Monitor] اكتشاف بث مباشر للمستخدم: ${user.username}!`);
@@ -43,9 +53,11 @@ async function checkMonitoredUsers(bot) {
  * تبدأ حلقة المراقبة الدورية
  * @param {Telegraf} bot 
  * @param {Function} recordFunction - دالة handleRecordLive من bot.js
+ * @param {Function} getRecordingsCountFn - دالة للحصول على عدد التسجيلات النشطة
  */
-function startMonitoring(bot, recordFunction) {
+function startMonitoring(bot, recordFunction, getRecordingsCountFn) {
     handleRecordLive = recordFunction; // تخزين الدالة للاستخدام
+    getUserRecordingsCount = getRecordingsCountFn; // تخزين دالة العداد
     console.log('[Monitor] تم تفعيل خدمة المراقبة.');
     setInterval(() => checkMonitoredUsers(bot), 300000);
     checkMonitoredUsers(bot);
