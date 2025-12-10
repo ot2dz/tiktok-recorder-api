@@ -598,22 +598,56 @@ async function handleRecordLive(ctx, username) {
                     
                     // الخطوة 3: إرسال إشعار إلى n8n
                     console.log(`[Upload] 📨 إرسال إشعار إلى n8n...`);
-                    const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
+                    
+                    let n8nSuccess = false;
+                    try {
+                        const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
+                        n8nSuccess = true;
+                    } catch (n8nError) {
+                        console.error(`[N8N] ❌ خطأ في إرسال الإشعار:`, n8nError);
+                    }
                     
                     uploadSuccessful = true;
                     
                     // تحديث الإحصائيات
                     await updateUploadStats(true);
                     
-                    // إرسال رسالة للمستخدم
-                    await ctx.reply(
-                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
-                        `👤 المستخدم: ${username}\n` +
-                        `📁 اسم الملف: ${s3Result.filename}\n` +
-                        `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\n\n` +
-                        `⏳ جاري الرفع إلى Google Drive...\n` +
-                        `� سيتم إرسال رابط المشاهدة عند انتهاء الرفع.`
-                    );
+                    // إرسال رسالة للمستخدم مع رابط R2
+                    if (n8nSuccess) {
+                        // نجح إرسال الإشعار لـ n8n
+                        await ctx.reply(
+                            `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                            `👤 المستخدم: ${username}\n` +
+                            `📁 اسم الملف: ${s3Result.filename}\n` +
+                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\n\n` +
+                            `⏳ جاري الرفع إلى Google Drive...\n` +
+                            `📤 سيتم إرسال رابط المشاهدة عند انتهاء الرفع.\n\n` +
+                            `🔗 رابط النسخة المؤقتة (R2):\n` +
+                            `\`${s3Result.s3Url}\``,
+                            { parse_mode: 'Markdown' }
+                        );
+                    } else {
+                        // فشل إرسال الإشعار لـ n8n - إرسال رابط مع زر إعادة المحاولة
+                        const retryButton = Markup.inlineKeyboard([
+                            [Markup.button.url('🔄 إعادة رفع يدوياً عبر n8n', `https://n8n.botdz.com/form/retry-upload`)],
+                            [Markup.button.url('📥 فتح الفيديو', s3Result.s3Url)]
+                        ]);
+                        
+                        await ctx.reply(
+                            `⚠️ تم حفظ الفيديو على R2 لكن فشل إرسال الإشعار لـ n8n!\n\n` +
+                            `👤 المستخدم: ${username}\n` +
+                            `📁 اسم الملف: ${s3Result.filename}\n` +
+                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\n\n` +
+                            `🔗 *رابط الفيديو على R2* (للرفع اليدوي):\n` +
+                            `\`${s3Result.s3Url}\`\n\n` +
+                            `📝 *معلومات إضافية للـ n8n:*\n` +
+                            `• S3 Key: \`${s3Result.s3Key}\`\n` +
+                            `• Username: \`${username}\`\n` +
+                            `• Chat ID: \`${ctx.chat.id}\`\n\n` +
+                            `💡 انسخ الرابط أعلاه وأعد المحاولة يدوياً عبر n8n`,
+                            { parse_mode: 'Markdown', ...retryButton }
+                        );
+                    }
 
                 } catch (processingError) {
                     console.error("❌ خطأ أثناء الرفع:", processingError);
