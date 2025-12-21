@@ -31,7 +31,7 @@ export async function uploadVideoToS3(filePath, username) {
         const fileName = path.basename(filePath);
         const fileStream = fs.createReadStream(filePath);
         const fileStats = fs.statSync(filePath);
-        
+
         console.log(`[S3] 📤 بدء رفع: ${fileName}`);
         console.log(`[S3] 📊 حجم الملف: ${(fileStats.size / 1024 / 1024).toFixed(2)} MB`);
 
@@ -52,13 +52,13 @@ export async function uploadVideoToS3(filePath, username) {
 
         // رفع الملف
         await s3Client.send(new PutObjectCommand(uploadParams));
-        
+
         // بناء الـ URL العام
         const s3Url = `${process.env.S3_ENDPOINT}/${BUCKET_NAME}/${s3Key}`;
-        
+
         console.log(`[S3] ✅ تم الرفع بنجاح!`);
         console.log(`[S3] 🔗 URL: ${s3Url}`);
-        
+
         // حذف الملف المحلي لتوفير المساحة
         try {
             fs.unlinkSync(filePath);
@@ -66,14 +66,15 @@ export async function uploadVideoToS3(filePath, username) {
         } catch (deleteError) {
             console.warn(`[S3] ⚠️ تحذير: فشل حذف الملف المحلي: ${deleteError.message}`);
         }
-        
+
         return {
             url: s3Url,
             key: s3Key,
             size: fileStats.size,
-            filename: fileName
+            filename: fileName,
+            bucket: BUCKET_NAME
         };
-        
+
     } catch (error) {
         console.error('[S3] ❌ فشل رفع الفيديو إلى S3:', error.message);
         throw new Error(`فشل رفع الفيديو إلى S3: ${error.message}`);
@@ -87,14 +88,14 @@ export async function uploadVideoToS3(filePath, username) {
 export async function deleteVideoFromS3(s3Key) {
     try {
         console.log(`[S3] 🗑️ جاري حذف الملف: ${s3Key}`);
-        
+
         await s3Client.send(new DeleteObjectCommand({
             Bucket: BUCKET_NAME,
             Key: s3Key
         }));
-        
+
         console.log(`[S3] ✅ تم حذف الملف من S3 بنجاح`);
-        
+
     } catch (error) {
         console.error(`[S3] ⚠️ فشل حذف الملف: ${error.message}`);
         // لا نرمي خطأ هنا - الحذف ليس حرجاً (Lifecycle سيحذفه لاحقاً)
@@ -108,25 +109,25 @@ export async function deleteVideoFromS3(s3Key) {
 export async function testS3Connection() {
     try {
         console.log('[S3] 🔍 اختبار الاتصال بـ Cloudflare R2...');
-        
+
         // محاولة رفع ملف اختبار صغير
         const testKey = 'test/connection-test.txt';
         const testContent = `Test connection at ${new Date().toISOString()}`;
-        
+
         await s3Client.send(new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: testKey,
             Body: testContent,
             ContentType: 'text/plain'
         }));
-        
+
         console.log('[S3] ✅ الاتصال ناجح!');
-        
+
         // حذف ملف الاختبار
         await deleteVideoFromS3(testKey);
-        
+
         return true;
-        
+
     } catch (error) {
         console.error('[S3] ❌ فشل الاتصال:', error.message);
         return false;

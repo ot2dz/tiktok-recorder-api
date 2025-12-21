@@ -28,7 +28,27 @@ async function recordLiveStream(streamUrl, username, signal) {
         response.data.pipe(writer);
 
         return new Promise((resolve, reject) => {
+            // --- مراقبة نشاط البث (Watchdog) ---
+            let lastDataTime = Date.now();
+            const WATCHDOG_INTERVAL = 10000; // فحص كل 10 ثواني
+            const INACTIVITY_TIMEOUT = 30000; // اعتبار البث متوقف بعد 30 ثانية من الصمت
+
+            const watchdogTimer = setInterval(() => {
+                const timeSinceLastData = Date.now() - lastDataTime;
+                if (timeSinceLastData > INACTIVITY_TIMEOUT) {
+                    console.warn(`[Recorder] ⚠️ لم يتم استلام بيانات منذ ${timeSinceLastData / 1000} ثانية. إنهاء التسجيل قسرياً.`);
+                    clearInterval(watchdogTimer);
+                    response.data.destroy(); // قطع الاتصال
+                    writer.end(); // إنهاء الملف
+                }
+            }, WATCHDOG_INTERVAL);
+
+            response.data.on('data', () => {
+                lastDataTime = Date.now();
+            });
+
             const onFinish = async () => {
+                clearInterval(watchdogTimer); // إيقاف المؤقت
                 console.log(`[Recorder] انتهى التسجيل. حجم الملف المؤقت: ${(writer.bytesWritten / 1024 / 1024).toFixed(2)} MB`);
                 try {
                     const finalMp4Path = await convertFlvToMp4(tempFilePath);
@@ -37,13 +57,15 @@ async function recordLiveStream(streamUrl, username, signal) {
                     reject(conversionError);
                 }
             };
-            
+
             const onError = (err) => {
+                clearInterval(watchdogTimer);
                 console.error('[Recorder] حدث خطأ أثناء كتابة الملف:', err);
                 reject(err);
             };
 
             signal.addEventListener('abort', () => {
+                clearInterval(watchdogTimer);
                 console.log(`[Recorder] تم طلب إيقاف التسجيل للمستخدم: ${username}`);
                 writer.end();
                 response.data.destroy();
@@ -55,10 +77,10 @@ async function recordLiveStream(streamUrl, username, signal) {
     } catch (error) {
         if (axios.isCancel(error)) {
             console.log('[Recorder] تم إلغاء طلب التحميل بنجاح.');
-             return convertFlvToMp4(tempFilePath);
+            return convertFlvToMp4(tempFilePath);
         }
         writer.close();
-         if (fs.existsSync(tempFilePath)) {
+        if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
         throw new Error('فشل الاتصال برابط البث.');

@@ -15,6 +15,7 @@ import { notifyN8nToUpload } from './services/n8n.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
+import { uploadVideoToDrive } from './services/drive.service.js';
 
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -80,37 +81,37 @@ bot.start((ctx) => {
 // أمر /list: عرض التسجيلات النشطة
 bot.command('list', (ctx) => {
     const userRecs = getUserRecordings(ctx.chat.id);
-    
+
     if (userRecs.size === 0) {
         ctx.reply('📋 لا توجد تسجيلات نشطة حالياً.');
         return;
     }
-    
+
     let message = `📋 *التسجيلات النشطة* (${userRecs.size}/3):\n\n`;
-    
+
     for (const recordingId of userRecs) {
         const recording = activeRecordings.get(recordingId);
         if (recording) {
             const duration = Math.floor((Date.now() - recording.startTime) / 1000);
             const minutes = Math.floor(duration / 60);
             const seconds = duration % 60;
-            
+
             message += `🔴 *${recording.username}*\n`;
             message += `⏱️ المدة: ${minutes}:${seconds.toString().padStart(2, '0')}\n`;
             message += `📝 ID: \`${recording.username}\`\n\n`;
         }
     }
-    
+
     message += `💡 لإيقاف تسجيل: /stop <username>\n`;
     message += `💡 لإيقاف الكل: /stop all`;
-    
+
     ctx.reply(message, { parse_mode: 'Markdown' });
 });
 
 // أمر /stop: إيقاف تسجيل محدد أو الكل
 bot.command('stop', async (ctx) => {
     const args = ctx.message.text.split(' ').slice(1);
-    
+
     if (args.length === 0) {
         ctx.reply(
             '❌ يجب تحديد اسم المستخدم أو "all"\n\n' +
@@ -121,20 +122,20 @@ bot.command('stop', async (ctx) => {
         );
         return;
     }
-    
+
     const target = args[0].toLowerCase();
     const userRecs = getUserRecordings(ctx.chat.id);
-    
+
     if (userRecs.size === 0) {
         ctx.reply('📋 لا توجد تسجيلات نشطة لإيقافها.');
         return;
     }
-    
+
     if (target === 'all') {
         // إيقاف جميع التسجيلات
         let stoppedCount = 0;
         const recordingsToStop = Array.from(userRecs);
-        
+
         for (const recordingId of recordingsToStop) {
             const recording = activeRecordings.get(recordingId);
             if (recording && recording.controller) {
@@ -142,13 +143,13 @@ bot.command('stop', async (ctx) => {
                 stoppedCount++;
             }
         }
-        
+
         ctx.reply(`⏹️ تم إيقاف ${stoppedCount} تسجيل(ات). سيتم معالجة الفيديوهات قريباً.`);
     } else {
         // إيقاف تسجيل محدد
         const username = target;
         let found = false;
-        
+
         for (const recordingId of userRecs) {
             const recording = activeRecordings.get(recordingId);
             if (recording && recording.username === username) {
@@ -160,7 +161,7 @@ bot.command('stop', async (ctx) => {
                 }
             }
         }
-        
+
         if (!found) {
             ctx.reply(`❌ لم يتم العثور على تسجيل نشط للمستخدم "${username}".\n\nاستخدم /list لعرض التسجيلات النشطة.`);
         }
@@ -193,10 +194,10 @@ bot.command('update_token', async (ctx) => {
     try {
         const redirectUri = process.env.OAUTH_REDIRECT_URI;
         const authUrl = generateOAuthUrl(ctx.chat.id);
-        
+
         // التحقق من نوع OAuth المستخدم
         const isAutomatic = redirectUri && !redirectUri.includes('urn:ietf:wg:oauth');
-        
+
         if (isAutomatic) {
             // طريقة OAuth التلقائية (مثل n8n)
             await ctx.reply(
@@ -226,7 +227,7 @@ bot.command('update_token', async (ctx) => {
                 '⏰ لديك 15 دقيقة لإكمال العملية.',
                 { parse_mode: 'Markdown', disable_web_page_preview: true }
             );
-            
+
             userState[ctx.chat.id] = 'waiting_for_oauth_code';
         }
     } catch (error) {
@@ -239,39 +240,39 @@ bot.command('update_token', async (ctx) => {
 bot.command('failed_videos', async (ctx) => {
     try {
         const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
-        
+
         if (failedVideos.length === 0) {
             await ctx.reply('✅ لا توجد فيديوهات فاشلة في قائمة الانتظار.');
             return;
         }
-        
+
         let message = `� *قائمة الفيديوهات الفاشلة* (${failedVideos.length})\n\n`;
-        
+
         const buttons = [];
-        
+
         failedVideos.forEach((video, index) => {
             const fileName = video.filepath.split('/').pop();
             const failedDate = new Date(video.failedAt).toLocaleString('ar-EG');
-            
+
             message += `${index + 1}️⃣ \`${fileName}\`\n`;
             message += `   � حجم: ${video.fileSize}\n`;
             message += `   ⏰ تاريخ: ${failedDate}\n`;
             message += `   ❌ سبب: ${video.error}\n`;
             message += `   🔄 محاولات: ${video.attempts}\n\n`;
-            
+
             // إضافة أزرار لكل فيديو
             buttons.push([
                 Markup.button.callback(`🔄 إعادة رفع #${index + 1}`, `retry_${video.id}`),
                 Markup.button.callback(`🗑️ حذف #${index + 1}`, `delete_${video.id}`)
             ]);
         });
-        
+
         // أزرار إضافية
         buttons.push([
             Markup.button.callback('🔄 إعادة رفع الكل', 'retry_all'),
             Markup.button.callback('🗑️ حذف الكل', 'delete_all')
         ]);
-        
+
         await ctx.reply(message, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard(buttons)
@@ -286,21 +287,21 @@ bot.command('failed_videos', async (ctx) => {
 bot.command('token_status', async (ctx) => {
     try {
         const status = await getTokenStatus();
-        
+
         const statusEmoji = status.hasToken ? '✅' : '❌';
         const statusText = status.hasToken ? 'نشط' : 'غير موجود';
-        
-        const lastUpdated = status.lastUpdated 
+
+        const lastUpdated = status.lastUpdated
             ? new Date(status.lastUpdated).toLocaleString('ar-EG')
             : 'غير معروف';
-            
+
         const lastUsed = status.lastUsed
             ? new Date(status.lastUsed).toLocaleString('ar-EG')
             : 'لم يُستخدم بعد';
-        
+
         const failedCount = await getFailedUploadsByChatId(ctx.chat.id);
-        
-        const message = 
+
+        const message =
             `📊 *حالة Google Drive Token*\n\n` +
             `الحالة: ${statusEmoji} ${statusText}\n` +
             `آخر تحديث: ${lastUpdated}\n` +
@@ -310,7 +311,7 @@ bot.command('token_status', async (ctx) => {
             `❌ رفع فاشل: ${status.stats.failedUploads}\n` +
             `� إجمالي: ${status.stats.totalUploads}\n\n` +
             `🎬 فيديوهات فاشلة حالياً: ${failedCount.length}`;
-        
+
         const buttons = [];
         if (!status.hasToken) {
             buttons.push([Markup.button.callback('� تحديث Token', 'update_token_now')]);
@@ -318,7 +319,7 @@ bot.command('token_status', async (ctx) => {
         if (failedCount.length > 0) {
             buttons.push([Markup.button.callback('📋 عرض الفيديوهات الفاشلة', 'show_failed')]);
         }
-        
+
         await ctx.reply(message, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard(buttons)
@@ -348,7 +349,7 @@ bot.action('list_monitor', async (ctx) => {
             .filter(u => u.chatId === ctx.chat.id)
             .map(u => `- @${u.username}`)
             .join('\n');
-        
+
         await ctx.reply(userList ? `قائمة المستخدمين قيد المراقبة:\n${userList}` : 'قائمة المراقبة فارغة.');
     } catch (error) {
         console.error("Error listing monitored users:", error);
@@ -362,7 +363,7 @@ bot.action('list_monitor', async (ctx) => {
 // زر إعادة رفع فيديو واحد
 bot.action(/^retry_(.+)$/, async (ctx) => {
     const videoId = ctx.match[1];
-    
+
     if (videoId === 'all') {
         // إعادة رفع الكل
         const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
@@ -370,19 +371,19 @@ bot.action(/^retry_(.+)$/, async (ctx) => {
             await ctx.answerCbQuery('لا توجد فيديوهات للرفع');
             return;
         }
-        
+
         await ctx.answerCbQuery(`جاري إعادة رفع ${failedVideos.length} فيديو...`);
         await retryUploadVideos(failedVideos, ctx);
     } else {
         // إعادة رفع فيديو واحد
         const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
         const video = failedVideos.find(v => v.id === videoId);
-        
+
         if (!video) {
             await ctx.answerCbQuery('الفيديو غير موجود');
             return;
         }
-        
+
         await ctx.answerCbQuery('جاري إعادة الرفع...');
         await retryUploadVideos([video], ctx);
     }
@@ -391,7 +392,7 @@ bot.action(/^retry_(.+)$/, async (ctx) => {
 // زر حذف فيديو
 bot.action(/^delete_(.+)$/, async (ctx) => {
     const videoId = ctx.match[1];
-    
+
     if (videoId === 'all') {
         // حذف الكل
         const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
@@ -404,7 +405,7 @@ bot.action(/^delete_(.+)$/, async (ctx) => {
         // حذف فيديو واحد
         await removeFailedUpload(videoId);
         await ctx.answerCbQuery('تم الحذف');
-        
+
         // تحديث القائمة
         const failedVideos = await getFailedUploadsByChatId(ctx.chat.id);
         if (failedVideos.length === 0) {
@@ -438,16 +439,16 @@ bot.on(message('text'), async (ctx) => {
         ctx.reply('الرجاء اختيار أحد الخيارات من القائمة أولاً.', mainKeyboard);
         return;
     }
-    
+
     // معالجة كود OAuth (للتوافق مع الطريقة القديمة)
     if (currentState === 'waiting_for_oauth_code') {
         delete userState[chatId];
-        
+
         try {
             await ctx.reply('⏳ جاري معالجة الكود...');
-            
+
             const refreshToken = await exchangeCodeForTokenLegacy(chatId, username);
-            
+
             await ctx.reply(
                 '✅ *تم تحديث Token بنجاح!*\n\n' +
                 '🔄 *Token يتم تجديده تلقائياً كل 50 دقيقة*\n\n' +
@@ -460,15 +461,15 @@ bot.on(message('text'), async (ctx) => {
                     ])
                 }
             );
-            
+
         } catch (error) {
             console.error('[Bot] خطأ في معالجة OAuth code:', error);
             await ctx.reply(`❌ فشل تحديث Token:\n${error.message}`);
         }
-        
+
         return;
     }
-    
+
     delete userState[chatId];
 
     switch (currentState) {
@@ -492,7 +493,7 @@ bot.on(message('text'), async (ctx) => {
 bot.action(/stop_record_(.+)/, (ctx) => {
     const recordingId = ctx.match[1];
     const recording = activeRecordings.get(recordingId);
-    
+
     if (recording && recording.controller) {
         ctx.answerCbQuery(`جاري إيقاف تسجيل ${recording.username}...`);
         recording.controller.abort();
@@ -520,7 +521,7 @@ async function handleCheckStatus(ctx, username) {
 async function handleRecordLive(ctx, username) {
     const chatId = ctx.chat.id;
     const userRecs = getUserRecordings(chatId);
-    
+
     // فحص 1: الحد الأقصى للتسجيلات المتزامنة
     if (userRecs.size >= 3) {
         await ctx.reply(
@@ -530,7 +531,7 @@ async function handleRecordLive(ctx, username) {
         );
         return;
     }
-    
+
     // فحص 2: منع تسجيل نفس المستخدم مرتين
     if (isUsernameAlreadyRecording(chatId, username)) {
         await ctx.reply(`❌ يوجد بالفعل تسجيل نشط للمستخدم ${username}.`);
@@ -538,7 +539,7 @@ async function handleRecordLive(ctx, username) {
     }
 
     const checkingMsg = await ctx.reply(`جاري التحقق من حالة ${username} قبل بدء التسجيل...`);
-    
+
     try {
         const roomId = await getRoomId(username);
         if (!roomId || !(await isUserLive(roomId))) {
@@ -555,19 +556,19 @@ async function handleRecordLive(ctx, username) {
         // إنشاء recordingId فريد
         const recordingId = generateRecordingId(username, chatId);
         const controller = new AbortController();
-        
+
         const stopButton = Markup.inlineKeyboard([
             Markup.button.callback('⏹️ إيقاف التسجيل', `stop_record_${recordingId}`)
         ]);
 
         const recordingMsg = await bot.telegram.editMessageText(
-            ctx.chat.id, 
-            checkingMsg.message_id, 
-            undefined, 
-            `🔴 بدأ تسجيل البث للمستخدم ${username}...\n📊 التسجيلات النشطة: ${userRecs.size + 1}/3`, 
+            ctx.chat.id,
+            checkingMsg.message_id,
+            undefined,
+            `🔴 بدأ تسجيل البث للمستخدم ${username}...\n📊 التسجيلات النشطة: ${userRecs.size + 1}/3`,
             stopButton
         );
-        
+
         // حفظ بيانات التسجيل
         activeRecordings.set(recordingId, {
             username,
@@ -576,7 +577,7 @@ async function handleRecordLive(ctx, username) {
             messageId: recordingMsg.message_id,
             startTime: Date.now()
         });
-        
+
         // إضافة recordingId إلى قائمة تسجيلات المستخدم
         userRecs.add(recordingId);
 
@@ -589,16 +590,16 @@ async function handleRecordLive(ctx, username) {
                 try {
                     // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
                     await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل لـ ${username}. جاري حفظ الفيديو...`);
-                    
+
                     // الخطوة 2: رفع الفيديو إلى Cloudflare R2
                     console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudflare R2: ${finalMp4Path}`);
                     s3Result = await uploadVideoToS3(finalMp4Path, username);
-                    
+
                     console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى S3`);
-                    
+
                     // الخطوة 3: إرسال إشعار إلى n8n
                     console.log(`[Upload] 📨 إرسال إشعار إلى n8n...`);
-                    
+
                     let n8nSuccess = false;
                     try {
                         const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
@@ -606,12 +607,12 @@ async function handleRecordLive(ctx, username) {
                     } catch (n8nError) {
                         console.error(`[N8N] ❌ خطأ في إرسال الإشعار:`, n8nError);
                     }
-                    
+
                     uploadSuccessful = true;
-                    
+
                     // تحديث الإحصائيات
                     await updateUploadStats(true);
-                    
+
                     // إرسال رسالة للمستخدم مع رابط R2
                     if (n8nSuccess) {
                         // نجح إرسال الإشعار لـ n8n
@@ -633,7 +634,7 @@ async function handleRecordLive(ctx, username) {
                             [Markup.button.url('🔄 إعادة رفع يدوياً عبر n8n', `https://n8n.botdz.com/form/retry-upload`)],
                             [Markup.button.url('📥 فتح الفيديو', r2Url)]
                         ]);
-                        
+
                         await ctx.reply(
                             `⚠️ تم حفظ الفيديو على R2 لكن فشل إرسال الإشعار لـ n8n!\\n\\n` +
                             `👤 المستخدم: ${username}\\n` +
@@ -652,12 +653,12 @@ async function handleRecordLive(ctx, username) {
 
                 } catch (processingError) {
                     console.error("❌ خطأ أثناء الرفع:", processingError);
-                    
+
                     if (!uploadSuccessful) {
                         // حساب حجم الملف
                         const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
                         const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
-                        
+
                         // إضافة الملف إلى قائمة الانتظار في DB
                         await addFailedUpload({
                             username,
@@ -667,11 +668,11 @@ async function handleRecordLive(ctx, username) {
                             fileSize,
                             attempts: 0
                         });
-                        
+
                         if (isTokenError) {
                             // خطأ Token - إرسال رابط تجديد
                             const oauthUrl = generateOAuthUrl(ctx.chat.id);
-                            
+
                             await ctx.reply(
                                 `🔐 *انتهت صلاحية Google Drive Token*\n\n` +
                                 `📁 تم حفظ الفيديو وإضافته لقائمة الانتظار\n` +
@@ -683,7 +684,7 @@ async function handleRecordLive(ctx, username) {
                                 `💡 أو استخدم: /update_token`,
                                 { parse_mode: 'Markdown', disable_web_page_preview: true }
                             );
-                            
+
                             userState[ctx.chat.id] = 'waiting_for_oauth_code';
                         } else {
                             // خطأ آخر
@@ -694,7 +695,7 @@ async function handleRecordLive(ctx, username) {
                                 `� استخدم /reupload لإعادة المحاولة`
                             );
                         }
-                        
+
                         console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف وإضافته للقائمة: ${finalMp4Path}`);
                         return; // الخروج بدون حذف الملف
                     }
@@ -719,11 +720,11 @@ async function handleRecordLive(ctx, username) {
                 // تنظيف حالة التسجيل
                 activeRecordings.delete(recordingId);
                 userRecs.delete(recordingId);
-                
+
                 if (currentlyRecording.has(username)) {
                     currentlyRecording.delete(username);
                 }
-                
+
                 console.log(`[Cleanup] تم تنظيف التسجيل: ${recordingId}`);
             });
 
@@ -737,7 +738,7 @@ async function handleRecordLive(ctx, username) {
 async function retryUploadVideos(videos, ctx) {
     let successCount = 0;
     let failedCount = 0;
-    
+
     for (const video of videos) {
         // التحقق من وجود الملف
         if (!fs.existsSync(video.filepath)) {
@@ -747,27 +748,27 @@ async function retryUploadVideos(videos, ctx) {
             await ctx.reply(`❌ الملف غير موجود: ${video.filepath.split('/').pop()}`);
             continue;
         }
-        
+
         // تحديث عدد المحاولات
         await incrementFailedUploadAttempts(video.id);
-        
+
         try {
             await ctx.reply(`🔄 جاري رفع: ${video.filepath.split('/').pop()}...`);
-            
+
             // محاولة الرفع
             const driveResult = await uploadVideoToDrive(video.filepath, video.username);
-            
+
             // نجح الرفع
             console.log(`[Retry] ✅ تم رفع الملف بنجاح: ${video.filepath}`);
             await updateUploadStats(true);
-            
+
             await ctx.reply(
                 `✅ تم رفع الفيديو بنجاح!\n\n` +
                 `📁 اسم الملف: ${driveResult.name}\n` +
                 `📊 الحجم: ${(driveResult.size / 1024 / 1024).toFixed(2)} MB\n\n` +
                 `🔗 رابط المشاهدة:\n${driveResult.directLink}`
             );
-            
+
             // حذف الملف المحلي بعد نجاح الرفع
             try {
                 fs.unlinkSync(video.filepath);
@@ -775,22 +776,22 @@ async function retryUploadVideos(videos, ctx) {
             } catch (deleteError) {
                 console.error(`[Retry] ⚠️ فشل حذف الملف: ${deleteError.message}`);
             }
-            
+
             // إزالة من قائمة الانتظار
             await removeFailedUpload(video.id);
             successCount++;
-            
+
         } catch (error) {
             console.error(`[Retry] ❌ فشل رفع الملف: ${video.filepath}`, error.message);
             failedCount++;
-            
+
             await ctx.reply(
                 `❌ فشل رفع: ${video.filepath.split('/').pop()}\n` +
                 `السبب: ${error.message}`
             );
         }
     }
-    
+
     // إرسال ملخص نهائي
     await ctx.reply(
         `📊 *ملخص إعادة الرفع:*\n\n` +

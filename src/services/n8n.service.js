@@ -27,9 +27,10 @@ export async function notifyN8nToUpload(s3Data, username, chatId) {
 
         console.log('[N8N] 📨 إرسال إشعار إلى n8n...');
         console.log(`[N8N] 📦 الملف: ${s3Data.filename}`);
-        
+
         const payload = {
             s3Url: s3Data.url,
+            s3Bucket: s3Data.bucket,
             s3Key: s3Data.key,
             filename: s3Data.filename,
             fileSize: s3Data.size,
@@ -46,19 +47,19 @@ export async function notifyN8nToUpload(s3Data, username, chatId) {
                 'User-Agent': 'TikTok-Recorder-Bot/1.0'
             }
         });
-        
+
         console.log('[N8N] ✅ تم إرسال الإشعار بنجاح');
         console.log(`[N8N] 📊 حالة الاستجابة: ${response.status}`);
-        
+
         return {
             success: true,
             status: response.status,
             data: response.data
         };
-        
+
     } catch (error) {
         console.error('[N8N] ❌ فشل إرسال الإشعار إلى n8n:', error.message);
-        
+
         // لا نرمي خطأ - الفيديو محفوظ في S3 على أي حال
         // يمكن إعادة المحاولة لاحقاً
         return {
@@ -81,7 +82,7 @@ export async function testN8nConnection() {
 
         console.log('[N8N] 🔍 اختبار الاتصال بـ n8n...');
         console.log(`[N8N] 🔗 URL: ${N8N_WEBHOOK_URL}`);
-        
+
         const response = await axios.post(N8N_WEBHOOK_URL, {
             test: true,
             message: 'Connection test from TikTok Recorder Bot',
@@ -89,19 +90,19 @@ export async function testN8nConnection() {
         }, {
             timeout: 5000
         });
-        
+
         console.log('[N8N] ✅ الاتصال ناجح!');
         console.log(`[N8N] 📊 حالة: ${response.status}`);
-        
+
         return true;
-        
+
     } catch (error) {
         console.error('[N8N] ❌ فشل الاتصال:', error.message);
-        
+
         if (error.code === 'ECONNREFUSED') {
             console.error('[N8N] 💡 تأكد من أن n8n يعمل وأن الـ Workflow مفعل');
         }
-        
+
         return false;
     }
 }
