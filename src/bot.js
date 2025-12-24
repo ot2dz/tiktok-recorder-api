@@ -3,6 +3,7 @@ import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
 import dns from 'dns';
+import { uploadDirectToN8n } from './services/n8n.service.js';
 
 // --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
 dns.setServers(['8.8.8.8', '1.1.1.1']);
@@ -11,7 +12,6 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideoToS3 } from './services/s3.service.js';
-import { notifyN8nToUpload } from './services/n8n.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
@@ -584,132 +584,65 @@ async function handleRecordLive(ctx, username) {
         // ---  منطق محسّن مع حماية من حذف الملفات قبل رفعها ---
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
-                let uploadSuccessful = false;
-                let s3Result = null;
-
                 try {
-                    // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
-                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل لـ ${username}. جاري حفظ الفيديو...`);
+                    // 1. حساب حجم الملف لكي نظهره في الرسالة
+                    const fileStats = fs.statSync(finalMp4Path);
+                    const fileSizeMB = (fileStats.size / 1024 / 1024).toFixed(2);
+                    const fileName = finalMp4Path.split('/').pop();
 
-                    // الخطوة 2: رفع الفيديو إلى Cloudflare R2
-                    console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudflare R2: ${finalMp4Path}`);
-                    s3Result = await uploadVideoToS3(finalMp4Path, username);
+                    // 2. إرسال رسالة تفصيلية للمستخدم (كما كانت في نسخة S3)
+                    await bot.telegram.editMessageText(
+                        ctx.chat.id,
+                        recordingMsg.message_id,
+                        undefined,
+                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                        `👤 المستخدم: ${username}\n` +
+                        `📁 اسم الملف: ${fileName}\n` +
+                        `📊 الحجم: ${fileSizeMB} MB\n\n` +
+                        `⏳ جاري الرفع المباشر إلى Google Drive عبر n8n...\n` +
+                        `📤 سيتم إرسال تأكيد عند اكتمال الرفع.`
+                    );
 
-                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى S3`);
+                    // 3. تنفيذ الرفع المباشر إلى n8n
+                    const result = await uploadDirectToN8n(finalMp4Path, username, ctx.chat.id);
 
-                    // الخطوة 3: إرسال إشعار إلى n8n
-                    console.log(`[Upload] 📨 إرسال إشعار إلى n8n...`);
+                    if (result.success) {
+                        // 4. حذف الملف المحلي بعد نجاح العملية بالكامل
+                        if (fs.existsSync(finalMp4Path)) {
+                            fs.unlinkSync(finalMp4Path);
+                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بعد نجاح الرفع لـ n8n`);
+                        }
 
-                    let n8nSuccess = false;
-                    try {
-                        const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
-                        n8nSuccess = true;
-                    } catch (n8nError) {
-                        console.error(`[N8N] ❌ خطأ في إرسال الإشعار:`, n8nError);
-                    }
+                        // تحديث إحصائيات الرفع في قاعدة البيانات
+                        await updateUploadStats(true);
 
-                    uploadSuccessful = true;
-
-                    // تحديث الإحصائيات
-                    await updateUploadStats(true);
-
-                    // إرسال رسالة للمستخدم مع رابط R2
-                    if (n8nSuccess) {
-                        // نجح إرسال الإشعار لـ n8n
-                        const r2Url = s3Result.url || s3Result.s3Url;
-                        await ctx.reply(
-                            `✅ تم حفظ الفيديو بنجاح!\\n\\n` +
-                            `👤 المستخدم: ${username}\\n` +
-                            `📁 اسم الملف: ${s3Result.filename}\\n` +
-                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\\n\\n` +
-                            `⏳ جاري الرفع إلى Google Drive...\\n` +
-                            `📤 سيتم إرسال رابط المشاهدة عند انتهاء الرفع.\\n\\n` +
-                            `🔗 رابط النسخة المؤقتة (R2):\\n` +
-                            `${r2Url}`
-                        );
+                        // ملاحظة: n8n هو من سيرسل رسالة "تم الرفع لـ Drive" النهائية كما هو مبرمج في Workflow الخاص به
                     } else {
-                        // فشل إرسال الإشعار لـ n8n - إرسال رابط مع زر إعادة المحاولة
-                        const r2Url = s3Result.url || s3Result.s3Url;
-                        const retryButton = Markup.inlineKeyboard([
-                            [Markup.button.url('🔄 إعادة رفع يدوياً عبر n8n', `https://n8n.botdz.com/form/retry-upload`)],
-                            [Markup.button.url('📥 فتح الفيديو', r2Url)]
-                        ]);
-
-                        await ctx.reply(
-                            `⚠️ تم حفظ الفيديو على R2 لكن فشل إرسال الإشعار لـ n8n!\\n\\n` +
-                            `👤 المستخدم: ${username}\\n` +
-                            `📁 اسم الملف: ${s3Result.filename}\\n` +
-                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\\n\\n` +
-                            `🔗 رابط الفيديو على R2 (للرفع اليدوي):\\n` +
-                            `${r2Url}\\n\\n` +
-                            `📝 معلومات إضافية للـ n8n:\\n` +
-                            `• S3 Key: ${s3Result.key}\\n` +
-                            `• Username: ${username}\\n` +
-                            `• Chat ID: ${ctx.chat.id}\\n\\n` +
-                            `💡 انسخ الرابط أعلاه وأعد المحاولة يدوياً عبر n8n`,
-                            retryButton
-                        );
+                        throw new Error(result.error);
                     }
 
                 } catch (processingError) {
-                    console.error("❌ خطأ أثناء الرفع:", processingError);
+                    console.error("❌ خطأ أثناء معالجة الفيديو:", processingError);
 
-                    if (!uploadSuccessful) {
-                        // حساب حجم الملف
-                        const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
-                        const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
+                    // في حالة فشل n8n، نحفظ الملف في قائمة الانتظار (DB) لإعادة المحاولة
+                    const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
+                    const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
 
-                        // إضافة الملف إلى قائمة الانتظار في DB
-                        await addFailedUpload({
-                            username,
-                            filepath: finalMp4Path,
-                            chatId: ctx.chat.id,
-                            error: processingError.message || 'Unknown error',
-                            fileSize,
-                            attempts: 0
-                        });
+                    await addFailedUpload({
+                        username,
+                        filepath: finalMp4Path,
+                        chatId: ctx.chat.id,
+                        error: processingError.message,
+                        fileSize,
+                        attempts: 0
+                    });
 
-                        if (isTokenError) {
-                            // خطأ Token - إرسال رابط تجديد
-                            const oauthUrl = generateOAuthUrl(ctx.chat.id);
-
-                            await ctx.reply(
-                                `🔐 *انتهت صلاحية Google Drive Token*\n\n` +
-                                `📁 تم حفظ الفيديو وإضافته لقائمة الانتظار\n` +
-                                `� الحجم: ${fileSize}\n\n` +
-                                `⚡ *لتجديد Token والرفع التلقائي:*\n` +
-                                `1️⃣ [اضغط هنا للتفويض](${oauthUrl})\n` +
-                                `2️⃣ سجل الدخول بحساب Google\n` +
-                                `3️⃣ انسخ الكود وأرسله هنا\n\n` +
-                                `💡 أو استخدم: /update_token`,
-                                { parse_mode: 'Markdown', disable_web_page_preview: true }
-                            );
-
-                            userState[ctx.chat.id] = 'waiting_for_oauth_code';
-                        } else {
-                            // خطأ آخر
-                            await ctx.reply(
-                                `⚠️ حدث خطأ أثناء رفع الفيديو.\n` +
-                                `📁 تم إضافة الملف لقائمة الانتظار (${getQueueSize()} ملف)\n` +
-                                `السبب: ${processingError.message}\n\n` +
-                                `� استخدم /reupload لإعادة المحاولة`
-                            );
-                        }
-
-                        console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف وإضافته للقائمة: ${finalMp4Path}`);
-                        return; // الخروج بدون حذف الملف
-                    }
-                } finally {
-                    // الخطوة 5: الحذف فقط إذا تم الرفع بنجاح
-                    if (uploadSuccessful && fs.existsSync(finalMp4Path)) {
-                        console.log(`[Cleanup] 🗑️ حذف الملف المحلي بعد نجاح الرفع: ${finalMp4Path}`);
-                        try {
-                            fs.unlinkSync(finalMp4Path);
-                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بنجاح`);
-                        } catch (deleteError) {
-                            console.error(`[Cleanup] ⚠️ فشل حذف الملف: ${deleteError.message}`);
-                        }
-                    }
+                    await ctx.reply(
+                        `⚠️ حدث مشكلة في الرفع التلقائي لـ ${username}.\n` +
+                        `📁 تم الاحتفاظ بالملف وإضافته لقائمة الانتظار.\n` +
+                        `السبب: ${processingError.message}\n\n` +
+                        `💡 استخدم /failed_videos لإدارته.`
+                    );
                 }
             })
             .catch(async (error) => {

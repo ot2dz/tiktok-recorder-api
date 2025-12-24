@@ -1,0 +1,13 @@
+{
+    "ignore": [
+        "db.json",
+        "downloads/*",
+        "node_modules/*",
+        "*.log",
+        ".git"
+    ],
+    "watch": [
+        "src/"
+    ],
+    "ext": "js,json,mjs"
+}
