@@ -366,13 +366,21 @@ checkLiveStatus(username);
       "chatId": 1077656944,
       "isRecording": false
     }
-  ]
+  ],
+  "settings": {
+    "googleAccessToken": null,
+    "tokenExpiryDate": null,
+    "tokenLastUpdated": "2025-12-23T17:08:33.078Z",
+    "tokenLastUsed": null
+  },
+  "failedUploads": [],
+  "stats": {
+    "totalUploads": 2,
+    "successfulUploads": 2,
+    "failedUploads": 0
+  }
 }
 ```
-
-# downloads/sifouxgaming_2025-11-30T23-45-04.mp4
-
-This is a binary file of the type: Binary
 
 # extract_usernames_session.session
 
@@ -381,6 +389,24 @@ This is a binary file of the type: Binary
 # leave_channels_session.session
 
 This is a binary file of the type: Binary
+
+# nodemon.json
+
+```json
+{
+    "ignore": [
+        "db.json",
+        "downloads/*",
+        "node_modules/*",
+        "*.log",
+        ".git"
+    ],
+    "watch": [
+        "src/"
+    ],
+    "ext": "js,json,mjs"
+}
+```
 
 # package.json
 
@@ -440,6 +466,7 @@ import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
 import dns from 'dns';
+import { uploadDirectToN8n } from './services/n8n.service.js';
 
 // --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
 dns.setServers(['8.8.8.8', '1.1.1.1']);
@@ -448,7 +475,6 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
 import { uploadVideoToS3 } from './services/s3.service.js';
-import { notifyN8nToUpload } from './services/n8n.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
@@ -1021,132 +1047,65 @@ async function handleRecordLive(ctx, username) {
         // ---  منطق محسّن مع حماية من حذف الملفات قبل رفعها ---
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
-                let uploadSuccessful = false;
-                let s3Result = null;
-
                 try {
-                    // الخطوة 1: إعلام المستخدم بانتهاء التسجيل
-                    await bot.telegram.editMessageText(ctx.chat.id, recordingMsg.message_id, undefined, `✅ انتهى التسجيل لـ ${username}. جاري حفظ الفيديو...`);
+                    // 1. حساب حجم الملف لكي نظهره في الرسالة
+                    const fileStats = fs.statSync(finalMp4Path);
+                    const fileSizeMB = (fileStats.size / 1024 / 1024).toFixed(2);
+                    const fileName = finalMp4Path.split('/').pop();
 
-                    // الخطوة 2: رفع الفيديو إلى Cloudflare R2
-                    console.log(`[Upload] 📤 بدء رفع الملف إلى Cloudflare R2: ${finalMp4Path}`);
-                    s3Result = await uploadVideoToS3(finalMp4Path, username);
+                    // 2. إرسال رسالة تفصيلية للمستخدم (كما كانت في نسخة S3)
+                    await bot.telegram.editMessageText(
+                        ctx.chat.id,
+                        recordingMsg.message_id,
+                        undefined,
+                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                        `👤 المستخدم: ${username}\n` +
+                        `📁 اسم الملف: ${fileName}\n` +
+                        `📊 الحجم: ${fileSizeMB} MB\n\n` +
+                        `⏳ جاري الرفع المباشر إلى Google Drive عبر n8n...\n` +
+                        `📤 سيتم إرسال تأكيد عند اكتمال الرفع.`
+                    );
 
-                    console.log(`[Upload] ✅ تم رفع الملف بنجاح إلى S3`);
+                    // 3. تنفيذ الرفع المباشر إلى n8n
+                    const result = await uploadDirectToN8n(finalMp4Path, username, ctx.chat.id);
 
-                    // الخطوة 3: إرسال إشعار إلى n8n
-                    console.log(`[Upload] 📨 إرسال إشعار إلى n8n...`);
+                    if (result.success) {
+                        // 4. حذف الملف المحلي بعد نجاح العملية بالكامل
+                        if (fs.existsSync(finalMp4Path)) {
+                            fs.unlinkSync(finalMp4Path);
+                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بعد نجاح الرفع لـ n8n`);
+                        }
 
-                    let n8nSuccess = false;
-                    try {
-                        const n8nResult = await notifyN8nToUpload(s3Result, username, ctx.chat.id);
-                        n8nSuccess = true;
-                    } catch (n8nError) {
-                        console.error(`[N8N] ❌ خطأ في إرسال الإشعار:`, n8nError);
-                    }
+                        // تحديث إحصائيات الرفع في قاعدة البيانات
+                        await updateUploadStats(true);
 
-                    uploadSuccessful = true;
-
-                    // تحديث الإحصائيات
-                    await updateUploadStats(true);
-
-                    // إرسال رسالة للمستخدم مع رابط R2
-                    if (n8nSuccess) {
-                        // نجح إرسال الإشعار لـ n8n
-                        const r2Url = s3Result.url || s3Result.s3Url;
-                        await ctx.reply(
-                            `✅ تم حفظ الفيديو بنجاح!\\n\\n` +
-                            `👤 المستخدم: ${username}\\n` +
-                            `📁 اسم الملف: ${s3Result.filename}\\n` +
-                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\\n\\n` +
-                            `⏳ جاري الرفع إلى Google Drive...\\n` +
-                            `📤 سيتم إرسال رابط المشاهدة عند انتهاء الرفع.\\n\\n` +
-                            `🔗 رابط النسخة المؤقتة (R2):\\n` +
-                            `${r2Url}`
-                        );
+                        // ملاحظة: n8n هو من سيرسل رسالة "تم الرفع لـ Drive" النهائية كما هو مبرمج في Workflow الخاص به
                     } else {
-                        // فشل إرسال الإشعار لـ n8n - إرسال رابط مع زر إعادة المحاولة
-                        const r2Url = s3Result.url || s3Result.s3Url;
-                        const retryButton = Markup.inlineKeyboard([
-                            [Markup.button.url('🔄 إعادة رفع يدوياً عبر n8n', `https://n8n.botdz.com/form/retry-upload`)],
-                            [Markup.button.url('📥 فتح الفيديو', r2Url)]
-                        ]);
-
-                        await ctx.reply(
-                            `⚠️ تم حفظ الفيديو على R2 لكن فشل إرسال الإشعار لـ n8n!\\n\\n` +
-                            `👤 المستخدم: ${username}\\n` +
-                            `📁 اسم الملف: ${s3Result.filename}\\n` +
-                            `📊 الحجم: ${(s3Result.size / 1024 / 1024).toFixed(2)} MB\\n\\n` +
-                            `🔗 رابط الفيديو على R2 (للرفع اليدوي):\\n` +
-                            `${r2Url}\\n\\n` +
-                            `📝 معلومات إضافية للـ n8n:\\n` +
-                            `• S3 Key: ${s3Result.key}\\n` +
-                            `• Username: ${username}\\n` +
-                            `• Chat ID: ${ctx.chat.id}\\n\\n` +
-                            `💡 انسخ الرابط أعلاه وأعد المحاولة يدوياً عبر n8n`,
-                            retryButton
-                        );
+                        throw new Error(result.error);
                     }
 
                 } catch (processingError) {
-                    console.error("❌ خطأ أثناء الرفع:", processingError);
+                    console.error("❌ خطأ أثناء معالجة الفيديو:", processingError);
 
-                    if (!uploadSuccessful) {
-                        // حساب حجم الملف
-                        const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
-                        const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
+                    // في حالة فشل n8n، نحفظ الملف في قائمة الانتظار (DB) لإعادة المحاولة
+                    const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
+                    const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
 
-                        // إضافة الملف إلى قائمة الانتظار في DB
-                        await addFailedUpload({
-                            username,
-                            filepath: finalMp4Path,
-                            chatId: ctx.chat.id,
-                            error: processingError.message || 'Unknown error',
-                            fileSize,
-                            attempts: 0
-                        });
+                    await addFailedUpload({
+                        username,
+                        filepath: finalMp4Path,
+                        chatId: ctx.chat.id,
+                        error: processingError.message,
+                        fileSize,
+                        attempts: 0
+                    });
 
-                        if (isTokenError) {
-                            // خطأ Token - إرسال رابط تجديد
-                            const oauthUrl = generateOAuthUrl(ctx.chat.id);
-
-                            await ctx.reply(
-                                `🔐 *انتهت صلاحية Google Drive Token*\n\n` +
-                                `📁 تم حفظ الفيديو وإضافته لقائمة الانتظار\n` +
-                                `� الحجم: ${fileSize}\n\n` +
-                                `⚡ *لتجديد Token والرفع التلقائي:*\n` +
-                                `1️⃣ [اضغط هنا للتفويض](${oauthUrl})\n` +
-                                `2️⃣ سجل الدخول بحساب Google\n` +
-                                `3️⃣ انسخ الكود وأرسله هنا\n\n` +
-                                `💡 أو استخدم: /update_token`,
-                                { parse_mode: 'Markdown', disable_web_page_preview: true }
-                            );
-
-                            userState[ctx.chat.id] = 'waiting_for_oauth_code';
-                        } else {
-                            // خطأ آخر
-                            await ctx.reply(
-                                `⚠️ حدث خطأ أثناء رفع الفيديو.\n` +
-                                `📁 تم إضافة الملف لقائمة الانتظار (${getQueueSize()} ملف)\n` +
-                                `السبب: ${processingError.message}\n\n` +
-                                `� استخدم /reupload لإعادة المحاولة`
-                            );
-                        }
-
-                        console.log(`[Safety] 🛡️ تم الاحتفاظ بالملف وإضافته للقائمة: ${finalMp4Path}`);
-                        return; // الخروج بدون حذف الملف
-                    }
-                } finally {
-                    // الخطوة 5: الحذف فقط إذا تم الرفع بنجاح
-                    if (uploadSuccessful && fs.existsSync(finalMp4Path)) {
-                        console.log(`[Cleanup] 🗑️ حذف الملف المحلي بعد نجاح الرفع: ${finalMp4Path}`);
-                        try {
-                            fs.unlinkSync(finalMp4Path);
-                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بنجاح`);
-                        } catch (deleteError) {
-                            console.error(`[Cleanup] ⚠️ فشل حذف الملف: ${deleteError.message}`);
-                        }
-                    }
+                    await ctx.reply(
+                        `⚠️ حدث مشكلة في الرفع التلقائي لـ ${username}.\n` +
+                        `📁 تم الاحتفاظ بالملف وإضافته لقائمة الانتظار.\n` +
+                        `السبب: ${processingError.message}\n\n` +
+                        `💡 استخدم /failed_videos لإدارته.`
+                    );
                 }
             })
             .catch(async (error) => {
@@ -2266,114 +2225,44 @@ export {
 
 ```js
 import axios from 'axios';
+import fs from 'fs';
+import FormData from 'form-data';
+import path from 'path';
 import 'dotenv/config';
 
-/**
- * خدمة التواصل مع n8n
- * لإرسال إشعارات لرفع الفيديوهات من S3 إلى Google Drive
- */
-
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-
-/**
- * إرسال إشعار لـ n8n لرفع فيديو من S3 إلى Google Drive
- * @param {Object} s3Data - معلومات الملف في S3
- * @param {string} s3Data.url - رابط الفيديو في S3
- * @param {string} s3Data.key - مفتاح الملف في S3
- * @param {string} s3Data.filename - اسم الملف
- * @param {number} s3Data.size - حجم الملف بالبايت
- * @param {string} username - اسم مستخدم TikTok
- * @param {number} chatId - معرف المحادثة في Telegram
- * @returns {Promise<Object>} استجابة n8n
- */
-export async function notifyN8nToUpload(s3Data, username, chatId) {
+export async function uploadDirectToN8n(filePath, username, chatId) {
     try {
-        if (!N8N_WEBHOOK_URL) {
-            throw new Error('N8N_WEBHOOK_URL غير محدد في Environment Variables');
-        }
+        const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
+        if (!N8N_WEBHOOK_URL) throw new Error('N8N_WEBHOOK_URL missing');
 
-        console.log('[N8N] 📨 إرسال إشعار إلى n8n...');
-        console.log(`[N8N] 📦 الملف: ${s3Data.filename}`);
+        console.log(`[n8n-Direct] 📤 بدء إرسال الملف مباشرة: ${path.basename(filePath)}`);
 
-        const payload = {
-            s3Url: s3Data.url,
-            s3Bucket: s3Data.bucket,
-            s3Key: s3Data.key,
-            filename: s3Data.filename,
-            fileSize: s3Data.size,
-            username: username,
-            chatId: chatId,
-            botToken: process.env.TELEGRAM_BOT_TOKEN,
-            timestamp: new Date().toISOString()
-        };
+        const form = new FormData();
+        // إرسال الملف كبيانات ثنائية
+        form.append('video', fs.createReadStream(filePath));
+        // إرسال البيانات الوصفية كحقول نصية
+        form.append('username', username);
+        form.append('chatId', chatId.toString());
+        form.append('filename', path.basename(filePath));
 
-        const response = await axios.post(N8N_WEBHOOK_URL, payload, {
-            timeout: 10000, // 10 ثواني
+        const response = await axios.post(N8N_WEBHOOK_URL, form, {
             headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'TikTok-Recorder-Bot/1.0'
-            }
+                ...form.getHeaders(),
+            },
+            // مهم جداً للفيديوهات الكبيرة: عدم تحديد وقت انتهاء قصير
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 0
         });
 
-        console.log('[N8N] ✅ تم إرسال الإشعار بنجاح');
-        console.log(`[N8N] 📊 حالة الاستجابة: ${response.status}`);
-
-        return {
-            success: true,
-            status: response.status,
-            data: response.data
-        };
+        console.log('[n8n-Direct] ✅ تم الاستلام من قبل n8n بنجاح');
+        return { success: true, data: response.data };
 
     } catch (error) {
-        console.error('[N8N] ❌ فشل إرسال الإشعار إلى n8n:', error.message);
-
-        // لا نرمي خطأ - الفيديو محفوظ في S3 على أي حال
-        // يمكن إعادة المحاولة لاحقاً
-        return {
-            success: false,
-            error: error.message
-        };
+        console.error('[n8n-Direct] ❌ فشل الإرسال المباشر:', error.message);
+        return { success: false, error: error.message };
     }
 }
-
-/**
- * اختبار الاتصال بـ n8n webhook
- * @returns {Promise<boolean>} true إذا نجح الاتصال
- */
-export async function testN8nConnection() {
-    try {
-        if (!N8N_WEBHOOK_URL) {
-            console.error('[N8N] ❌ N8N_WEBHOOK_URL غير محدد');
-            return false;
-        }
-
-        console.log('[N8N] 🔍 اختبار الاتصال بـ n8n...');
-        console.log(`[N8N] 🔗 URL: ${N8N_WEBHOOK_URL}`);
-
-        const response = await axios.post(N8N_WEBHOOK_URL, {
-            test: true,
-            message: 'Connection test from TikTok Recorder Bot',
-            timestamp: new Date().toISOString()
-        }, {
-            timeout: 5000
-        });
-
-        console.log('[N8N] ✅ الاتصال ناجح!');
-        console.log(`[N8N] 📊 حالة: ${response.status}`);
-
-        return true;
-
-    } catch (error) {
-        console.error('[N8N] ❌ فشل الاتصال:', error.message);
-
-        if (error.code === 'ECONNREFUSED') {
-            console.error('[N8N] 💡 تأكد من أن n8n يعمل وأن الـ Workflow مفعل');
-        }
-
-        return false;
-    }
-}
-
 ```
 
 # src/services/oauth-telegram.service.js

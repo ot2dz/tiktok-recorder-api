@@ -7,15 +7,16 @@
     }
   ],
   "settings": {
-    "googleAccessToken": null,
-    "tokenExpiryDate": null,
-    "tokenLastUpdated": "2025-12-23T17:08:33.078Z",
-    "tokenLastUsed": null
+    "googleAccessToken": "ya29.a0Aa7pCA_1gTlclKfRKKCE1ClQhn539os4-ZFED3Kj6wCBxdTOycHnjVZ4ENaKgO_aHcB2lRvAaFoHWuP-4HCCWoNgKR5nL7PM0seJ7QZe1Hu4wy-4V2O2xO7a2SBPgFztoXkMZCIw-okktM_w8sToES9D-ahIutv_OBdueovAfrOuYsWEqScgGYXyQfw2E0gZ6DU2-x0aCgYKAYcSARcSFQHGX2Mic_d_UrMYvok7w4Y2ahjCJQ0206",
+    "tokenExpiryDate": 1766930322106,
+    "tokenLastUpdated": "2025-12-28T12:58:43.107Z",
+    "tokenLastUsed": "2025-12-28T16:10:46.403Z",
+    "googleRefreshToken": "1//03r1EAW9SWlYZCgYIARAAGAMSNwF-L9Ir4MtTfIeXOUC3BJAo1OLH-RByP74h8CLi_GgLOx7KNrMUu3T5oifQvw4TdQnzXFSZNYY"
   },
   "failedUploads": [],
   "stats": {
-    "totalUploads": 2,
-    "successfulUploads": 2,
+    "totalUploads": 3,
+    "successfulUploads": 3,
     "failedUploads": 0
   }
 }

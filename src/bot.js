@@ -3,7 +3,6 @@ import { message } from 'telegraf/filters';
 import fs from 'fs';
 import 'dotenv/config';
 import dns from 'dns';
-import { uploadDirectToN8n } from './services/n8n.service.js';
 
 // --- الحل النهائي: تعيين خوادم DNS بشكل صريح للتطبيق بأكمله ---
 dns.setServers(['8.8.8.8', '1.1.1.1']);
@@ -11,7 +10,6 @@ console.log('[DNS Fix] تم تعيين خوادم DNS بشكل صريح إلى G
 
 import { getRoomId, isUserLive, getLiveStreamUrl } from './services/tiktok.service.js';
 import { recordLiveStream } from './core/recorder.service.js';
-import { uploadVideoToS3 } from './services/s3.service.js';
 import { setupDatabase, addUserToMonitor, removeUserFromMonitor, getMonitoredUsers, addFailedUpload, getFailedUploadsByChatId, removeFailedUpload, incrementFailedUploadAttempts, getTokenStatus, updateUploadStats } from './services/db.service.js';
 import { startMonitoring, currentlyRecording } from './core/monitoring.service.js';
 import { generateOAuthUrl, exchangeCodeForTokenLegacy, saveRefreshToken, pendingOAuthStates } from './services/oauth-telegram.service.js';
@@ -246,7 +244,7 @@ bot.command('failed_videos', async (ctx) => {
             return;
         }
 
-        let message = `� *قائمة الفيديوهات الفاشلة* (${failedVideos.length})\n\n`;
+        let message = ` *قائمة الفيديوهات الفاشلة* (${failedVideos.length})\n\n`;
 
         const buttons = [];
 
@@ -255,7 +253,7 @@ bot.command('failed_videos', async (ctx) => {
             const failedDate = new Date(video.failedAt).toLocaleString('ar-EG');
 
             message += `${index + 1}️⃣ \`${fileName}\`\n`;
-            message += `   � حجم: ${video.fileSize}\n`;
+            message += `    حجم: ${video.fileSize}\n`;
             message += `   ⏰ تاريخ: ${failedDate}\n`;
             message += `   ❌ سبب: ${video.error}\n`;
             message += `   🔄 محاولات: ${video.attempts}\n\n`;
@@ -309,12 +307,12 @@ bot.command('token_status', async (ctx) => {
             `📈 *الإحصائيات:*\n` +
             `✅ رفع ناجح: ${status.stats.successfulUploads}\n` +
             `❌ رفع فاشل: ${status.stats.failedUploads}\n` +
-            `� إجمالي: ${status.stats.totalUploads}\n\n` +
+            ` إجمالي: ${status.stats.totalUploads}\n\n` +
             `🎬 فيديوهات فاشلة حالياً: ${failedCount.length}`;
 
         const buttons = [];
         if (!status.hasToken) {
-            buttons.push([Markup.button.callback('� تحديث Token', 'update_token_now')]);
+            buttons.push([Markup.button.callback(' تحديث Token', 'update_token_now')]);
         }
         if (failedCount.length > 0) {
             buttons.push([Markup.button.callback('📋 عرض الفيديوهات الفاشلة', 'show_failed')]);
@@ -585,46 +583,43 @@ async function handleRecordLive(ctx, username) {
         recordLiveStream(streamUrl, username, controller.signal)
             .then(async (finalMp4Path) => {
                 try {
-                    // 1. حساب حجم الملف لكي نظهره في الرسالة
-                    const fileStats = fs.statSync(finalMp4Path);
-                    const fileSizeMB = (fileStats.size / 1024 / 1024).toFixed(2);
-                    const fileName = finalMp4Path.split('/').pop();
-
-                    // 2. إرسال رسالة تفصيلية للمستخدم (كما كانت في نسخة S3)
+                    // 1. إعلام المستخدم ببدء الرفع
                     await bot.telegram.editMessageText(
                         ctx.chat.id,
                         recordingMsg.message_id,
                         undefined,
-                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                        `✅ انتهى التسجيل!\n\n` +
                         `👤 المستخدم: ${username}\n` +
-                        `📁 اسم الملف: ${fileName}\n` +
-                        `📊 الحجم: ${fileSizeMB} MB\n\n` +
-                        `⏳ جاري الرفع المباشر إلى Google Drive عبر n8n...\n` +
-                        `📤 سيتم إرسال تأكيد عند اكتمال الرفع.`
+                        `⏳ جاري المعالجة والرفع إلى Google Drive...`
                     );
 
-                    // 3. تنفيذ الرفع المباشر إلى n8n
-                    const result = await uploadDirectToN8n(finalMp4Path, username, ctx.chat.id);
+                    // 2. الرفع إلى Google Drive
+                    const driveResult = await uploadVideoToDrive(finalMp4Path, username);
 
-                    if (result.success) {
-                        // 4. حذف الملف المحلي بعد نجاح العملية بالكامل
-                        if (fs.existsSync(finalMp4Path)) {
-                            fs.unlinkSync(finalMp4Path);
-                            console.log(`[Cleanup] ✅ تم حذف الملف المحلي بعد نجاح الرفع لـ n8n`);
-                        }
+                    // 3. إرسال رابط المشاهدة
+                    const fileSizeMB = (driveResult.size / 1024 / 1024).toFixed(2);
 
-                        // تحديث إحصائيات الرفع في قاعدة البيانات
-                        await updateUploadStats(true);
+                    await ctx.reply(
+                        `✅ تم حفظ الفيديو بنجاح!\n\n` +
+                        `👤 المستخدم: ${username}\n` +
+                        `📁 اسم الملف: ${driveResult.name}\n` +
+                        `📊 الحجم: ${fileSizeMB} MB\n\n` +
+                        `🔗 رابط المشاهدة (Drive):\n${driveResult.directLink}`
+                    );
 
-                        // ملاحظة: n8n هو من سيرسل رسالة "تم الرفع لـ Drive" النهائية كما هو مبرمج في Workflow الخاص به
-                    } else {
-                        throw new Error(result.error);
+                    // 4. حذف الملف المحلي
+                    if (fs.existsSync(finalMp4Path)) {
+                        fs.unlinkSync(finalMp4Path);
+                        console.log(`[Cleanup] ✅ تم حذف الملف المحلي: ${finalMp4Path}`);
                     }
+
+                    // تحديث الإحصائيات
+                    await updateUploadStats(true);
 
                 } catch (processingError) {
                     console.error("❌ خطأ أثناء معالجة الفيديو:", processingError);
 
-                    // في حالة فشل n8n، نحفظ الملف في قائمة الانتظار (DB) لإعادة المحاولة
+                    // حفظ في قائمة الانتظار
                     const fileStats = fs.existsSync(finalMp4Path) ? fs.statSync(finalMp4Path) : null;
                     const fileSize = fileStats ? `${(fileStats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
 
@@ -637,12 +632,21 @@ async function handleRecordLive(ctx, username) {
                         attempts: 0
                     });
 
-                    await ctx.reply(
-                        `⚠️ حدث مشكلة في الرفع التلقائي لـ ${username}.\n` +
+                    // رسالة الخطأ
+                    let errorMsg = `⚠️ حدث مشكلة في الرفع لـ ${username}.\n` +
                         `📁 تم الاحتفاظ بالملف وإضافته لقائمة الانتظار.\n` +
-                        `السبب: ${processingError.message}\n\n` +
-                        `💡 استخدم /failed_videos لإدارته.`
-                    );
+                        `السبب: ${processingError.message}\n\n`;
+
+                    if (processingError.isTokenExpired) {
+                        const oauthUrl = generateOAuthUrl(ctx.chat.id);
+                        errorMsg += `🔐 *انتهت صلاحية Token*\n` +
+                            `[اضغط هنا لتجديد Token](${oauthUrl})`;
+                        userState[ctx.chat.id] = 'waiting_for_oauth_code';
+                    } else {
+                        errorMsg += `💡 استخدم /failed_videos لإدارته.`;
+                    }
+
+                    await ctx.reply(errorMsg, { parse_mode: 'Markdown', disable_web_page_preview: true });
                 }
             })
             .catch(async (error) => {

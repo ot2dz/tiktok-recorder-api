@@ -18,10 +18,20 @@ async function recordLiveStream(streamUrl, username, signal) {
     console.log(`[Recorder] سيتم حفظ الملف في: ${tempFilePath}`);
 
     try {
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+            'Referer': 'https://www.tiktok.com/',
+        };
+
+        if (process.env.TIKTOK_COOKIE) {
+            headers['Cookie'] = process.env.TIKTOK_COOKIE;
+        }
+
         const response = await axios({
             method: 'get',
             url: streamUrl,
             responseType: 'stream',
+            headers,
             signal,
         });
 
@@ -83,7 +93,18 @@ async function recordLiveStream(streamUrl, username, signal) {
         if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
-        throw new Error('فشل الاتصال برابط البث.');
+
+        // تفاصيل الخطأ
+        if (error.response) {
+            console.error(`[Recorder] خطأ من الخادم: ${error.response.status} - ${error.response.statusText}`);
+            console.error('[Recorder] Headers:', error.response.headers);
+        } else if (error.request) {
+            console.error('[Recorder] لم يتم استلام رد من الخادم.');
+        } else {
+            console.error('[Recorder] خطأ في إعداد الطلب:', error.message);
+        }
+
+        throw new Error(`فشل الاتصال برابط البث: ${error.message}`);
     }
 }
 
